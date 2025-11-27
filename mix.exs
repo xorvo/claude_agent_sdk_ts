@@ -2,7 +2,7 @@ defmodule ClaudeAgent.MixProject do
   use Mix.Project
 
   @version "0.1.0"
-  @source_url "https://github.com/horvohaoriwa/claude_agent"
+  @source_url "https://github.com/xorvo/claude_agent_sdk_ts"
 
   def project do
     [
@@ -46,7 +46,7 @@ defmodule ClaudeAgent.MixProject do
 
   defp package do
     [
-      name: "claude_agent",
+      name: "claude_agent_ts",
       licenses: ["MIT"],
       links: %{
         "GitHub" => @source_url

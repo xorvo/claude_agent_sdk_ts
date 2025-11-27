@@ -21,12 +21,12 @@ This library provides a native Elixir interface for interacting with Claude, wit
 
 ## Installation
 
-Add `claude_agent` to your list of dependencies in `mix.exs`:
+Add `claude_agent_ts` to your list of dependencies in `mix.exs`:
 
 ```elixir
 def deps do
   [
-    {:claude_agent, "~> 0.1.0"}
+    {:claude_agent_ts, "~> 0.1.0"}
   ]
 end
 ```
