@@ -1,0 +1,334 @@
+defmodule ClaudeAgent.PortBridge do
+  @moduledoc """
+  Manages communication with the Node.js bridge process via Erlang ports.
+
+  This module handles:
+  - Spawning and managing the Node.js process
+  - Sending JSON-encoded commands
+  - Receiving and parsing JSON responses
+  - Handling streaming responses
+
+  ## Debug Logging
+
+  Set the log level to :debug to see all communication:
+
+      config :logger, level: :debug
+
+  Or at runtime:
+
+      Logger.configure(level: :debug)
+  """
+
+  use GenServer
+  require Logger
+
+  @type state :: %{
+          port: port() | nil,
+          pending: %{reference() => {pid(), any()}},
+          buffer: String.t()
+        }
+
+  # Client API
+
+  @doc """
+  Starts the PortBridge GenServer.
+  """
+  def start_link(opts \\ []) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  @doc """
+  Sends a chat request to Claude and waits for the complete response.
+  """
+  @spec chat(String.t(), map()) :: {:ok, String.t()} | {:error, term()}
+  def chat(prompt, opts \\ %{}) do
+    GenServer.call(__MODULE__, {:chat, prompt, opts}, opts[:timeout] || 300_000)
+  end
+
+  @doc """
+  Sends a chat request and streams responses to the given callback or process.
+  """
+  @spec stream(String.t(), map(), pid() | (map() -> any())) :: :ok | {:error, term()}
+  def stream(prompt, opts \\ %{}, callback) do
+    GenServer.call(__MODULE__, {:stream, prompt, opts, callback}, opts[:timeout] || 300_000)
+  end
+
+  @doc """
+  Sends a tool result back to an ongoing conversation.
+  """
+  @spec send_tool_result(String.t(), any()) :: :ok
+  def send_tool_result(tool_use_id, result) do
+    GenServer.cast(__MODULE__, {:tool_result, tool_use_id, result})
+  end
+
+  # Server Callbacks
+
+  @impl true
+  def init(_opts) do
+    state = %{
+      port: nil,
+      pending: %{},
+      buffer: ""
+    }
+
+    {:ok, state, {:continue, :start_port}}
+  end
+
+  @impl true
+  def handle_continue(:start_port, state) do
+    port = start_node_port()
+    {:noreply, %{state | port: port}}
+  end
+
+  @impl true
+  def handle_call({:chat, prompt, opts}, from, state) do
+    ref = make_ref()
+
+    command = %{
+      type: "chat",
+      id: inspect(ref),
+      prompt: prompt,
+      options: opts
+    }
+
+    send_command(state.port, command)
+    pending = Map.put(state.pending, inspect(ref), {from, :chat, []})
+
+    {:noreply, %{state | pending: pending}}
+  end
+
+  @impl true
+  def handle_call({:stream, prompt, opts, callback}, from, state) do
+    ref = make_ref()
+
+    command = %{
+      type: "stream",
+      id: inspect(ref),
+      prompt: prompt,
+      options: opts
+    }
+
+    send_command(state.port, command)
+    pending = Map.put(state.pending, inspect(ref), {from, :stream, callback})
+
+    {:noreply, %{state | pending: pending}}
+  end
+
+  @impl true
+  def handle_cast({:tool_result, tool_use_id, result}, state) do
+    command = %{
+      type: "tool_result",
+      toolUseId: tool_use_id,
+      result: result
+    }
+
+    send_command(state.port, command)
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({port, {:data, data}}, %{port: port} = state) when is_binary(data) do
+    # Handle combined stdout/stderr data (using :stderr_to_stdout)
+    handle_stdout(data, state)
+  end
+
+  @impl true
+  def handle_info({port, {:data, data}}, %{port: port} = state) when is_list(data) do
+    # Handle charlist data
+    handle_stdout(to_string(data), state)
+  end
+
+  @impl true
+  def handle_info({port, {:exit_status, status}}, %{port: port} = state) do
+    Logger.error("Node bridge exited with status #{status}, restarting...")
+
+    # Reply to all pending requests with error
+    for {_ref, {from, _type, _data}} <- state.pending do
+      GenServer.reply(from, {:error, :bridge_crashed})
+    end
+
+    # Restart the port
+    new_port = start_node_port()
+    {:noreply, %{state | port: new_port, pending: %{}, buffer: ""}}
+  end
+
+  @impl true
+  def handle_info(_msg, state) do
+    {:noreply, state}
+  end
+
+  # Private helper for processing stdout/stderr data
+  defp handle_stdout(data_str, state) do
+    buffer = state.buffer <> data_str
+    {messages, log_lines, remaining} = extract_lines(buffer)
+
+    # Forward TypeScript logs through Elixir Logger
+    Enum.each(log_lines, &log_bridge_message/1)
+
+    # Process JSON messages
+    state = %{state | buffer: remaining}
+
+    state =
+      Enum.reduce(messages, state, fn msg, acc ->
+        Logger.debug("[PortBridge] Processing message: #{inspect(msg, limit: 200)}")
+        handle_message(msg, acc)
+      end)
+
+    {:noreply, state}
+  end
+
+  defp log_bridge_message(line) do
+    # Parse bridge log format: [timestamp] [Bridge] message
+    case Regex.run(~r/^\[[\d\-T:.Z]+\] \[Bridge\] (.+)$/, line) do
+      [_, message] ->
+        Logger.debug("[Node] #{message}")
+
+      nil ->
+        # Log unparsed lines as-is (e.g., errors from Node.js itself)
+        Logger.debug("[Node] #{line}")
+    end
+  end
+
+  # Private Functions
+
+  defp start_node_port do
+    priv_dir = :code.priv_dir(:claude_agent) |> to_string()
+    bridge_path = Path.join([priv_dir, "node_bridge", "dist", "bridge.js"])
+
+    Logger.debug("[PortBridge] Starting Node.js bridge at #{bridge_path}")
+
+    # Build environment: inherit all parent env vars and add debug flag
+    # Don't force CLAUDE_CODE_USE_BEDROCK - let the SDK auto-detect from ~/.aws config
+    env =
+      System.get_env()
+      |> Map.merge(%{"CLAUDE_AGENT_DEBUG" => "1"})
+      |> Enum.map(fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)
+
+    port = Port.open({:spawn_executable, System.find_executable("node")}, [
+      :binary,
+      :exit_status,
+      :stderr_to_stdout,
+      {:args, [bridge_path]},
+      {:env, env},
+      {:cd, priv_dir}
+    ])
+
+    Logger.debug("[PortBridge] Node.js bridge started, port: #{inspect(port)}")
+    port
+  end
+
+  defp send_command(port, command) do
+    json = Jason.encode!(command) <> "\n"
+    Logger.debug("[PortBridge] Sending command: #{String.slice(json, 0, 500)}")
+    Port.command(port, json)
+  end
+
+  defp extract_lines(buffer) do
+    lines = String.split(buffer, "\n")
+
+    case List.pop_at(lines, -1) do
+      {remaining, complete} ->
+        # Separate JSON messages from log lines
+        {json_lines, log_lines} =
+          complete
+          |> Enum.reject(&(&1 == ""))
+          |> Enum.split_with(&String.starts_with?(&1, "{"))
+
+        messages =
+          json_lines
+          |> Enum.map(&parse_json/1)
+          |> Enum.reject(&is_nil/1)
+
+        {messages, log_lines, remaining || ""}
+    end
+  end
+
+  defp parse_json(line) do
+    case Jason.decode(line) do
+      {:ok, json} -> json
+      {:error, _} ->
+        Logger.warning("[PortBridge] Failed to parse JSON: #{String.slice(line, 0, 100)}")
+        nil
+    end
+  end
+
+  defp handle_message(%{"id" => id, "type" => "complete", "content" => content}, state) do
+    case Map.pop(state.pending, id) do
+      {{from, :chat, _}, pending} ->
+        GenServer.reply(from, {:ok, content})
+        %{state | pending: pending}
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_message(%{"id" => id, "type" => "chunk", "content" => content}, state) do
+    case Map.get(state.pending, id) do
+      {_from, :stream, callback} when is_function(callback) ->
+        callback.(%{type: :chunk, content: content})
+        state
+
+      {_from, :stream, pid} when is_pid(pid) ->
+        send(pid, {:claude_chunk, content})
+        state
+
+      {from, :chat, chunks} ->
+        pending = Map.put(state.pending, id, {from, :chat, [content | chunks]})
+        %{state | pending: pending}
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_message(%{"id" => id, "type" => "end"}, state) do
+    case Map.pop(state.pending, id) do
+      {{from, :stream, callback}, pending} when is_function(callback) ->
+        callback.(%{type: :end})
+        GenServer.reply(from, :ok)
+        %{state | pending: pending}
+
+      {{from, :stream, pid}, pending} when is_pid(pid) ->
+        send(pid, :claude_end)
+        GenServer.reply(from, :ok)
+        %{state | pending: pending}
+
+      {{from, :chat, chunks}, pending} ->
+        content = chunks |> Enum.reverse() |> Enum.join("")
+        GenServer.reply(from, {:ok, content})
+        %{state | pending: pending}
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_message(%{"id" => id, "type" => "tool_use"} = msg, state) do
+    case Map.get(state.pending, id) do
+      {_from, :stream, callback} when is_function(callback) ->
+        callback.(ClaudeAgent.Response.parse(msg))
+        state
+
+      {_from, :stream, pid} when is_pid(pid) ->
+        send(pid, {:claude_tool_use, msg})
+        state
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_message(%{"id" => id, "type" => "error", "message" => message}, state) do
+    case Map.pop(state.pending, id) do
+      {{from, _type, _}, pending} ->
+        GenServer.reply(from, {:error, message})
+        %{state | pending: pending}
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_message(_msg, state), do: state
+end

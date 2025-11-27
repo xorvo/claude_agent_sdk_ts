@@ -1,0 +1,33 @@
+# Elixir
+/_build/
+/cover/
+/deps/
+/doc/
+/.fetch
+erl_crash.dump
+*.ez
+*.beam
+/config/*.secret.exs
+.elixir_ls/
+
+# Node.js
+priv/node_bridge/node_modules/
+priv/node_bridge/dist/
+priv/node_bridge/package-lock.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+/tmp/
+
+# Claude Code
+.claude/
