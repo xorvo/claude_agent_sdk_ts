@@ -46,7 +46,7 @@ defmodule ClaudeAgent.MixProject do
 
   defp package do
     [
-      name: "claude_agent_ts",
+      name: "claude_agent_sdk_ts",
       licenses: ["MIT"],
       links: %{
         "GitHub" => @source_url
