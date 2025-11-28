@@ -12,8 +12,6 @@ erl_crash.dump
 
 # Node.js
 priv/node_bridge/node_modules/
-priv/node_bridge/dist/
-priv/node_bridge/package-lock.json
 
 # IDE
 .idea/
