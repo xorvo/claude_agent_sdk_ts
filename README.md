@@ -26,7 +26,7 @@ Add `claude_agent_sdk_ts` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:claude_agent_sdk_ts, "~> 0.1.0"}
+    {:claude_agent_sdk_ts, "~> 1.0"}
   ]
 end
 ```
