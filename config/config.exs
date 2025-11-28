@@ -1,9 +1,9 @@
 import Config
 
-# Default configuration for ClaudeAgent
+# Default configuration for ClaudeAgentSdkTs
 # These can be overridden in environment-specific config files
 
-config :claude_agent,
+config :claude_agent_sdk_ts,
   # Use AWS Bedrock for Claude access
   use_bedrock: true,
 

@@ -1,4 +1,4 @@
-defmodule ClaudeAgent.Response do
+defmodule ClaudeAgentSdkTs.Response do
   @moduledoc """
   Represents a response from Claude.
   """

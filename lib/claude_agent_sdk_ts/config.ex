@@ -1,10 +1,10 @@
-defmodule ClaudeAgent.Config do
+defmodule ClaudeAgentSdkTs.Config do
   @moduledoc """
-  Configuration management for ClaudeAgent.
+  Configuration management for ClaudeAgentSdkTs.
 
   Configuration can be set in your config.exs:
 
-      config :claude_agent,
+      config :claude_agent_sdk_ts,
         model: "claude-sonnet-4-20250514",
         max_turns: 10,
         max_budget_usd: 1.0,
@@ -80,7 +80,7 @@ defmodule ClaudeAgent.Config do
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
-    app_config = Application.get_all_env(:claude_agent)
+    app_config = Application.get_all_env(:claude_agent_sdk_ts)
 
     merged =
       @defaults

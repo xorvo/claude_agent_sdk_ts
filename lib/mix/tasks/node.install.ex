@@ -1,28 +1,34 @@
-defmodule Mix.Tasks.Node.Install do
+defmodule Mix.Tasks.ClaudeAgentSdkTs.Install do
   @moduledoc """
-  Installs Node.js dependencies for the ClaudeAgent bridge.
+  Installs Node.js dependencies for ClaudeAgentSdkTs.
 
-  This task runs automatically after `mix deps.get` and can also be run manually.
+  This task is called automatically when the application starts if dependencies
+  are not already installed. You can also run it manually:
 
-  ## Usage
+      mix claude_agent_sdk_ts.install
 
-      mix node.install
+  ## Options
+
+    * `--if-missing` - Only install if not already installed (default behavior)
+    * `--force` - Force reinstallation even if already installed
 
   ## Requirements
 
   - Node.js >= 18.0.0
-  - npm or yarn
+  - npm
   """
 
   use Mix.Task
 
-  @shortdoc "Installs Node.js dependencies for ClaudeAgent"
+  @shortdoc "Installs Node.js dependencies for ClaudeAgentSdkTs"
 
   @impl Mix.Task
-  def run(_args) do
-    node_bridge_path = node_bridge_path()
+  def run(args) do
+    {opts, _, _} = OptionParser.parse(args, switches: [force: :boolean, if_missing: :boolean])
 
-    Mix.shell().info("Installing Node.js dependencies for ClaudeAgent...")
+    # Start required apps for HTTP/SSL if needed
+    Application.ensure_all_started(:inets)
+    Application.ensure_all_started(:ssl)
 
     # Check Node.js is available
     case System.cmd("node", ["--version"], stderr_to_stdout: true) do
@@ -33,42 +39,27 @@ defmodule Mix.Tasks.Node.Install do
         Mix.raise("Node.js is required but not found. Please install Node.js >= 18.0.0")
     end
 
-    # Install npm dependencies
-    Mix.shell().info("Running npm install in #{node_bridge_path}...")
+    force? = Keyword.get(opts, :force, false)
+    if_missing? = Keyword.get(opts, :if_missing, false)
 
-    case System.cmd("npm", ["install"], cd: node_bridge_path, stderr_to_stdout: true) do
-      {output, 0} ->
-        Mix.shell().info(output)
-        Mix.shell().info("✓ npm dependencies installed")
+    if if_missing? and ClaudeAgentSdkTs.installed?() do
+      Mix.shell().info("Node.js dependencies already installed")
+    else
+      if force? do
+        Mix.shell().info("Force reinstalling Node.js dependencies...")
+        ClaudeAgentSdkTs.install!(force: true)
+      else
+        case ClaudeAgentSdkTs.install() do
+          :ok ->
+            Mix.shell().info("Node.js dependencies installed successfully")
 
-      {output, code} ->
-        Mix.raise("npm install failed with exit code #{code}:\n#{output}")
+          {:error, msg} ->
+            Mix.raise(msg)
+        end
+      end
     end
 
-    # Build TypeScript
-    Mix.shell().info("Building TypeScript bridge...")
-
-    case System.cmd("npm", ["run", "build"], cd: node_bridge_path, stderr_to_stdout: true) do
-      {output, 0} ->
-        Mix.shell().info(output)
-        Mix.shell().info("✓ TypeScript bridge built successfully")
-
-      {output, code} ->
-        Mix.raise("TypeScript build failed with exit code #{code}:\n#{output}")
-    end
-
-    Mix.shell().info("✓ ClaudeAgent Node.js bridge is ready!")
-  end
-
-  defp node_bridge_path do
-    # During development, use the local priv directory
-    # After compilation, use :code.priv_dir
-    case :code.priv_dir(:claude_agent) do
-      {:error, :bad_name} ->
-        Path.join([File.cwd!(), "priv", "node_bridge"])
-
-      priv_dir ->
-        Path.join(to_string(priv_dir), "node_bridge")
-    end
+    deps_path = ClaudeAgentSdkTs.node_modules_path()
+    Mix.shell().info("Dependencies installed to: #{deps_path}")
   end
 end

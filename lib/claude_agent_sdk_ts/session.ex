@@ -1,4 +1,4 @@
-defmodule ClaudeAgent.Session do
+defmodule ClaudeAgentSdkTs.Session do
   @moduledoc """
   A GenServer that manages a stateful conversation session with Claude.
 
@@ -7,25 +7,25 @@ defmodule ClaudeAgent.Session do
 
   ## Usage
 
-      {:ok, session} = ClaudeAgent.Session.start_link()
+      {:ok, session} = ClaudeAgentSdkTs.Session.start_link()
 
       # First message
-      {:ok, response1} = ClaudeAgent.Session.chat(session, "My favorite color is blue")
+      {:ok, response1} = ClaudeAgentSdkTs.Session.chat(session, "My favorite color is blue")
 
       # Claude will remember the context
-      {:ok, response2} = ClaudeAgent.Session.chat(session, "What's my favorite color?")
+      {:ok, response2} = ClaudeAgentSdkTs.Session.chat(session, "What's my favorite color?")
 
       # Reset conversation history
-      ClaudeAgent.Session.reset(session)
+      ClaudeAgentSdkTs.Session.reset(session)
 
       # Stop the session
-      ClaudeAgent.Session.stop(session)
+      ClaudeAgentSdkTs.Session.stop(session)
   """
 
   use GenServer
   require Logger
 
-  alias ClaudeAgent.{Config, Tool}
+  alias ClaudeAgentSdkTs.{Config, Tool}
 
   @type state :: %{
           config: Config.t(),
@@ -40,14 +40,14 @@ defmodule ClaudeAgent.Session do
 
   ## Options
 
-  Same options as `ClaudeAgent.chat/2`, plus:
+  Same options as `ClaudeAgentSdkTs.chat/2`, plus:
     * `:tools` - List of tools available for the entire session
     * `:name` - Optional name to register the process
 
   ## Examples
 
-      {:ok, session} = ClaudeAgent.Session.start_link()
-      {:ok, session} = ClaudeAgent.Session.start_link(name: :my_session)
+      {:ok, session} = ClaudeAgentSdkTs.Session.start_link()
+      {:ok, session} = ClaudeAgentSdkTs.Session.start_link(name: :my_session)
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -57,11 +57,11 @@ defmodule ClaudeAgent.Session do
   end
 
   @doc """
-  Starts a session under the ClaudeAgent.SessionSupervisor.
+  Starts a session under the ClaudeAgentSdkTs.SessionSupervisor.
   """
   @spec start_supervised(keyword()) :: DynamicSupervisor.on_start_child()
   def start_supervised(opts \\ []) do
-    DynamicSupervisor.start_child(ClaudeAgent.SessionSupervisor, {__MODULE__, opts})
+    DynamicSupervisor.start_child(ClaudeAgentSdkTs.SessionSupervisor, {__MODULE__, opts})
   end
 
   @doc """
@@ -150,7 +150,7 @@ defmodule ClaudeAgent.Session do
     # Add conversation history context to the prompt
     prompt = build_prompt_with_history(message, state.history)
 
-    case ClaudeAgent.PortBridge.chat(prompt, bridge_opts) do
+    case ClaudeAgentSdkTs.PortBridge.chat(prompt, bridge_opts) do
       {:ok, response} ->
         # Update history with the new exchange
         history =
@@ -285,7 +285,7 @@ defmodule ClaudeAgent.Session do
     collected = Agent.start_link(fn -> [] end)
 
     result =
-      ClaudeAgent.PortBridge.stream(prompt, bridge_opts, fn msg ->
+      ClaudeAgentSdkTs.PortBridge.stream(prompt, bridge_opts, fn msg ->
         case callback.(msg) do
           {:collect, content} ->
             case collected do

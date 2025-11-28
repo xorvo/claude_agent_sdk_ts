@@ -1,12 +1,12 @@
-defmodule ClaudeAgent.MixProject do
+defmodule ClaudeAgentSdkTs.MixProject do
   use Mix.Project
 
-  @version "0.1.0"
+  @version "1.0.1"
   @source_url "https://github.com/xorvo/claude_agent_sdk_ts"
 
   def project do
     [
-      app: :claude_agent,
+      app: :claude_agent_sdk_ts,
       version: @version,
       elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
@@ -15,7 +15,7 @@ defmodule ClaudeAgent.MixProject do
       description: description(),
       package: package(),
       docs: docs(),
-      name: "ClaudeAgent",
+      name: "ClaudeAgentSdkTs",
       source_url: @source_url
     ]
   end
@@ -23,7 +23,7 @@ defmodule ClaudeAgent.MixProject do
   def application do
     [
       extra_applications: [:logger],
-      mod: {ClaudeAgent.Application, []}
+      mod: {ClaudeAgentSdkTs.Application, []}
     ]
   end
 
@@ -35,9 +35,7 @@ defmodule ClaudeAgent.MixProject do
   end
 
   defp aliases do
-    [
-      "deps.get": ["deps.get", "node.install"]
-    ]
+    []
   end
 
   defp description do
@@ -51,7 +49,8 @@ defmodule ClaudeAgent.MixProject do
       links: %{
         "GitHub" => @source_url
       },
-      files: ~w(lib priv/node_bridge/package.json priv/node_bridge/src priv/node_bridge/tsconfig.json mix.exs README.md LICENSE)
+      files:
+        ~w(lib priv/node_bridge/package.json priv/node_bridge/package-lock.json priv/node_bridge/dist mix.exs README.md LICENSE)
     ]
   end
 

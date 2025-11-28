@@ -1,4 +1,4 @@
-defmodule ClaudeAgent.Tool do
+defmodule ClaudeAgentSdkTs.Tool do
   @moduledoc """
   Defines a tool that Claude can invoke during a conversation.
 
@@ -7,7 +7,7 @@ defmodule ClaudeAgent.Tool do
 
   ## Example
 
-      weather_tool = %ClaudeAgent.Tool{
+      weather_tool = %ClaudeAgentSdkTs.Tool{
         name: "get_weather",
         description: "Get the current weather for a given city",
         parameters: %{
@@ -25,7 +25,7 @@ defmodule ClaudeAgent.Tool do
         end
       }
 
-      ClaudeAgent.chat("What's the weather in Tokyo?", tools: [weather_tool])
+      ClaudeAgentSdkTs.chat("What's the weather in Tokyo?", tools: [weather_tool])
   """
 
   @type handler :: (map() -> {:ok, any()} | {:error, String.t()})

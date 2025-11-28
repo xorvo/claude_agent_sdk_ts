@@ -1,8 +1,8 @@
-defmodule ClaudeAgentTest do
+defmodule ClaudeAgentSdkTsTest do
   use ExUnit.Case
-  doctest ClaudeAgent
+  doctest ClaudeAgentSdkTs
 
-  alias ClaudeAgent.{Config, Tool, Response}
+  alias ClaudeAgentSdkTs.{Config, Tool, Response}
 
   describe "Config" do
     test "new/0 creates config with defaults" do

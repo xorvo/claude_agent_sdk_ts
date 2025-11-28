@@ -1,4 +1,4 @@
-defmodule ClaudeAgent.PortBridge do
+defmodule ClaudeAgentSdkTs.PortBridge do
   @moduledoc """
   Manages communication with the Node.js bridge process via Erlang ports.
 
@@ -192,26 +192,26 @@ defmodule ClaudeAgent.PortBridge do
   # Private Functions
 
   defp start_node_port do
-    priv_dir = :code.priv_dir(:claude_agent) |> to_string()
-    bridge_path = Path.join([priv_dir, "node_bridge", "dist", "bridge.js"])
+    priv_dir = ClaudeAgentSdkTs.priv_path()
+    bridge_path = Path.join([priv_dir, "dist", "bridge.js"])
 
     Logger.debug("[PortBridge] Starting Node.js bridge at #{bridge_path}")
 
     # Build environment: inherit all parent env vars and add debug flag
-    # Don't force CLAUDE_CODE_USE_BEDROCK - let the SDK auto-detect from ~/.aws config
     env =
       System.get_env()
       |> Map.merge(%{"CLAUDE_AGENT_DEBUG" => "1"})
       |> Enum.map(fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)
 
-    port = Port.open({:spawn_executable, System.find_executable("node")}, [
-      :binary,
-      :exit_status,
-      :stderr_to_stdout,
-      {:args, [bridge_path]},
-      {:env, env},
-      {:cd, priv_dir}
-    ])
+    port =
+      Port.open({:spawn_executable, System.find_executable("node")}, [
+        :binary,
+        :exit_status,
+        :stderr_to_stdout,
+        {:args, [bridge_path]},
+        {:env, env},
+        {:cd, priv_dir}
+      ])
 
     Logger.debug("[PortBridge] Node.js bridge started, port: #{inspect(port)}")
     port
@@ -245,7 +245,9 @@ defmodule ClaudeAgent.PortBridge do
 
   defp parse_json(line) do
     case Jason.decode(line) do
-      {:ok, json} -> json
+      {:ok, json} ->
+        json
+
       {:error, _} ->
         Logger.warning("[PortBridge] Failed to parse JSON: #{String.slice(line, 0, 100)}")
         nil
@@ -307,7 +309,7 @@ defmodule ClaudeAgent.PortBridge do
   defp handle_message(%{"id" => id, "type" => "tool_use"} = msg, state) do
     case Map.get(state.pending, id) do
       {_from, :stream, callback} when is_function(callback) ->
-        callback.(ClaudeAgent.Response.parse(msg))
+        callback.(ClaudeAgentSdkTs.Response.parse(msg))
         state
 
       {_from, :stream, pid} when is_pid(pid) ->

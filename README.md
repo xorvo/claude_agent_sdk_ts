@@ -1,4 +1,4 @@
-# ClaudeAgent
+# ClaudeAgentSdkTs
 
 An Elixir wrapper around the official TypeScript Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`).
 
@@ -44,7 +44,7 @@ This will automatically install the Node.js dependencies and build the TypeScrip
 Configure in your `config/config.exs`:
 
 ```elixir
-config :claude_agent,
+config :claude_agent_sdk_ts,
   model: "claude-sonnet-4-20250514",
   max_turns: 10,
   timeout: 300_000,
@@ -81,17 +81,17 @@ Or pass options directly to function calls.
 
 ```elixir
 # Basic usage
-{:ok, response} = ClaudeAgent.chat("What is the capital of France?")
+{:ok, response} = ClaudeAgentSdkTs.chat("What is the capital of France?")
 IO.puts(response)
 
 # With options
-{:ok, response} = ClaudeAgent.chat("Explain quantum computing",
+{:ok, response} = ClaudeAgentSdkTs.chat("Explain quantum computing",
   model: "claude-sonnet-4-20250514",
   max_turns: 5
 )
 
 # Bang version that raises on error
-response = ClaudeAgent.chat!("Hello!")
+response = ClaudeAgentSdkTs.chat!("Hello!")
 ```
 
 ### Streaming Responses
@@ -99,7 +99,7 @@ response = ClaudeAgent.chat!("Hello!")
 #### Callback-based streaming
 
 ```elixir
-ClaudeAgent.stream("Count to 5", [max_turns: 1], fn
+ClaudeAgentSdkTs.stream("Count to 5", [max_turns: 1], fn
   %{type: :chunk, content: text} -> IO.write(text)
   %{type: :end} -> IO.puts("\n---Done---")
   _ -> :ok
@@ -109,7 +109,7 @@ end)
 #### Elixir Stream-based streaming
 
 ```elixir
-ClaudeAgent.stream!("Tell me a story")
+ClaudeAgentSdkTs.stream!("Tell me a story")
 |> Stream.each(&IO.write/1)
 |> Stream.run()
 ```
@@ -120,7 +120,7 @@ Set the working directory for file operations:
 
 ```elixir
 # Create files in a specific directory
-{:ok, response} = ClaudeAgent.chat(
+{:ok, response} = ClaudeAgentSdkTs.chat(
   "Create a file called hello.txt with 'Hello World!'",
   cwd: "/path/to/directory",
   max_turns: 3
@@ -133,10 +133,10 @@ Set the working directory for file operations:
 ┌─────────────────────────────────────────────────────────┐
 │                    Elixir Application                    │
 ├─────────────────────────────────────────────────────────┤
-│  ClaudeAgent                                             │
+│  ClaudeAgentSdkTs                                        │
 │  - chat/2, stream/3, stream!/2                          │
 ├─────────────────────────────────────────────────────────┤
-│  ClaudeAgent.PortBridge (GenServer)                      │
+│  ClaudeAgentSdkTs.PortBridge (GenServer)                 │
 │  - Erlang Port to Node.js                                │
 │  - JSON message passing via stdin/stdout                 │
 │  - TypeScript logs piped through Elixir Logger           │
