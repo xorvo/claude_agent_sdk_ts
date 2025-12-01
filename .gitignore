@@ -10,8 +10,8 @@ erl_crash.dump
 /config/*.secret.exs
 .elixir_ls/
 
-# Node.js
-priv/node_bridge/node_modules/
+# Node.js (symlink to _build, created at runtime)
+priv/node_bridge/node_modules
 
 # IDE
 .idea/
@@ -26,6 +26,7 @@ Thumbs.db
 
 # Test artifacts
 /tmp/
+/test_consumer/
 
 # Claude Code
 .claude/

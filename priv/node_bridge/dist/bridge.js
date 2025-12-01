@@ -2,9 +2,12 @@
  * Node.js Bridge for ClaudeAgent Elixir wrapper
  *
  * This script communicates with Elixir via stdin/stdout using newline-delimited JSON.
- * It wraps the official @anthropic-ai/claude-code SDK.
+ * It wraps the official @anthropic-ai/claude-agent-sdk.
+ *
+ * Supports multimodal inputs (images) via structured content blocks.
  */
 import * as readline from "readline";
+import { randomUUID } from "crypto";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 // Debug logging - writes to stderr so it doesn't interfere with JSON protocol on stdout
 const DEBUG = process.env.CLAUDE_AGENT_DEBUG === "1";
@@ -51,6 +54,46 @@ function extractToolUse(message) {
     }
     return null;
 }
+/**
+ * Build the prompt parameter for query().
+ * Supports both simple string prompts and structured multimodal content.
+ *
+ * Content format for images:
+ * [
+ *   { type: "text", text: "What's in this image?" },
+ *   { type: "image", source: { type: "base64", media_type: "image/png", data: "..." } }
+ * ]
+ *
+ * Or with URL:
+ * [
+ *   { type: "text", text: "Describe this:" },
+ *   { type: "image", source: { type: "url", url: "https://..." } }
+ * ]
+ */
+function buildPrompt(command) {
+    const { prompt, content } = command;
+    // If content array is provided, convert to SDKUserMessage async iterable
+    if (content && Array.isArray(content)) {
+        debug("Building multimodal prompt from content array", { contentLength: content.length });
+        // Create a single SDKUserMessage with the structured content
+        const userMessage = {
+            type: "user",
+            message: {
+                role: "user",
+                content: content
+            },
+            parent_tool_use_id: null,
+            uuid: randomUUID(),
+            session_id: randomUUID()
+        };
+        // Return an async iterable that yields the single message
+        return (async function* () {
+            yield userMessage;
+        })();
+    }
+    // Otherwise, use the simple string prompt
+    return prompt;
+}
 // Build SDK options from command options
 function buildOptions(opts = {}) {
     const sdkOptions = {};
@@ -78,13 +121,15 @@ function buildOptions(opts = {}) {
 }
 // Handle a chat command (collect all responses)
 async function handleChat(command) {
-    const { id, prompt, options = {} } = command;
-    debug(`handleChat called`, { id, prompt: prompt.slice(0, 100), options });
+    const { id, prompt, content, options = {} } = command;
+    const promptPreview = prompt ? prompt.slice(0, 100) : `[multimodal: ${content?.length || 0} blocks]`;
+    debug(`handleChat called`, { id, prompt: promptPreview, options });
     try {
         const sdkOptions = buildOptions(options);
         debug("SDK options built", sdkOptions);
         debug("Calling query()...");
-        const response = query({ prompt, options: sdkOptions });
+        const promptParam = buildPrompt(command);
+        const response = query({ prompt: promptParam, options: sdkOptions });
         debug("query() returned, starting iteration...");
         let fullContent = "";
         let resultMessage = null;
@@ -127,15 +172,17 @@ async function handleChat(command) {
 }
 // Handle a streaming chat command
 async function handleStream(command) {
-    const { id, prompt, options = {} } = command;
-    debug(`handleStream called`, { id, prompt: prompt.slice(0, 100), options });
+    const { id, prompt, content, options = {} } = command;
+    const promptPreview = prompt ? prompt.slice(0, 100) : `[multimodal: ${content?.length || 0} blocks]`;
+    debug(`handleStream called`, { id, prompt: promptPreview, options });
     try {
         const sdkOptions = buildOptions(options);
         debug("SDK options built for stream", sdkOptions);
         // Enable partial messages for streaming
         sdkOptions.includePartialMessages = true;
         debug("Calling query() for stream...");
-        const response = query({ prompt, options: sdkOptions });
+        const promptParam = buildPrompt(command);
+        const response = query({ prompt: promptParam, options: sdkOptions });
         debug("query() returned, starting stream iteration...");
         // Track what we've already sent to only send deltas
         let sentTextLength = 0;

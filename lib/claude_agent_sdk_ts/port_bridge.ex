@@ -39,14 +39,38 @@ defmodule ClaudeAgentSdkTs.PortBridge do
 
   @doc """
   Sends a chat request to Claude and waits for the complete response.
+
+  The prompt can be either:
+    - A string for simple text prompts
+    - A map with `:content` key containing a list of content blocks for multimodal inputs
+
+  ## Multimodal Content Blocks
+
+      # Image from base64
+      content = [
+        %{type: "text", text: "What's in this image?"},
+        %{type: "image", source: %{type: "base64", media_type: "image/png", data: "..."}}
+      ]
+      PortBridge.chat(%{content: content}, opts)
+
+      # Image from URL
+      content = [
+        %{type: "text", text: "Describe this:"},
+        %{type: "image", source: %{type: "url", url: "https://..."}}
+      ]
+      PortBridge.chat(%{content: content}, opts)
   """
-  @spec chat(String.t(), map()) :: {:ok, String.t()} | {:error, term()}
+  @spec chat(String.t() | %{content: list()}, map()) :: {:ok, String.t()} | {:error, term()}
   def chat(prompt, opts \\ %{}) do
     GenServer.call(__MODULE__, {:chat, prompt, opts}, opts[:timeout] || 300_000)
   end
 
   @doc """
   Sends a chat request and streams responses to the given callback or process.
+
+  The prompt can be either:
+    - A string for simple text prompts
+    - A map with `:content` key containing a list of content blocks for multimodal inputs
 
   Uses an activity-based timeout that resets whenever data is received from the
   Claude API. This prevents false-positive timeouts during long-running but
@@ -58,8 +82,11 @@ defmodule ClaudeAgentSdkTs.PortBridge do
       The timeout resets each time a chunk, tool_use, or other message is received.
       Only triggers if there's no activity for the specified duration.
 
+  ## Multimodal Content Blocks
+
+  See `chat/2` for examples of multimodal content blocks.
   """
-  @spec stream(String.t(), map(), pid() | (map() -> any())) :: :ok | {:error, term()}
+  @spec stream(String.t() | %{content: list()}, map(), pid() | (map() -> any())) :: :ok | {:error, term()}
   def stream(prompt, opts \\ %{}, callback) do
     timeout = opts[:timeout] || 300_000
     ref = make_ref()
@@ -121,12 +148,24 @@ defmodule ClaudeAgentSdkTs.PortBridge do
   def handle_call({:chat, prompt, opts}, from, state) do
     ref = make_ref()
 
-    command = %{
-      type: "chat",
-      id: inspect(ref),
-      prompt: prompt,
-      options: opts
-    }
+    command =
+      case prompt do
+        %{content: content} when is_list(content) ->
+          %{
+            type: "chat",
+            id: inspect(ref),
+            content: content,
+            options: opts
+          }
+
+        prompt when is_binary(prompt) ->
+          %{
+            type: "chat",
+            id: inspect(ref),
+            prompt: prompt,
+            options: opts
+          }
+      end
 
     send_command(state.port, command)
     pending = Map.put(state.pending, inspect(ref), {from, :chat, []})
@@ -136,12 +175,24 @@ defmodule ClaudeAgentSdkTs.PortBridge do
 
   @impl true
   def handle_cast({:stream, prompt, opts, callback, caller, ref}, state) do
-    command = %{
-      type: "stream",
-      id: inspect(ref),
-      prompt: prompt,
-      options: opts
-    }
+    command =
+      case prompt do
+        %{content: content} when is_list(content) ->
+          %{
+            type: "stream",
+            id: inspect(ref),
+            content: content,
+            options: opts
+          }
+
+        prompt when is_binary(prompt) ->
+          %{
+            type: "stream",
+            id: inspect(ref),
+            prompt: prompt,
+            options: opts
+          }
+      end
 
     send_command(state.port, command)
     # Store caller pid and ref for activity signaling and completion notification

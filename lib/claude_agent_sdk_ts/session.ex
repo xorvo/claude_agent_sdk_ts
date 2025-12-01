@@ -68,8 +68,23 @@ defmodule ClaudeAgentSdkTs.Session do
   Sends a message in the session and waits for the response.
 
   The conversation history is automatically maintained.
+
+  The message can be either:
+    - A string for simple text prompts
+    - A map with `:content` key containing a list of content blocks for multimodal inputs
+
+  ## Examples
+
+      # Text message
+      {:ok, response} = Session.chat(session, "Hello!")
+
+      # Multimodal message with image
+      alias ClaudeAgentSdkTs.Content
+      content = [Content.text("What's in this image?"), Content.image_file("photo.png")]
+      {:ok, response} = Session.chat(session, %{content: content})
   """
-  @spec chat(GenServer.server(), String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  @spec chat(GenServer.server(), String.t() | %{content: list()}, keyword()) ::
+          {:ok, String.t()} | {:error, term()}
   def chat(session, message, opts \\ []) do
     GenServer.call(session, {:chat, message, opts}, opts[:timeout] || 300_000)
   end
@@ -77,7 +92,7 @@ defmodule ClaudeAgentSdkTs.Session do
   @doc """
   Same as `chat/3` but raises on error.
   """
-  @spec chat!(GenServer.server(), String.t(), keyword()) :: String.t()
+  @spec chat!(GenServer.server(), String.t() | %{content: list()}, keyword()) :: String.t()
   def chat!(session, message, opts \\ []) do
     case chat(session, message, opts) do
       {:ok, response} -> response
@@ -87,8 +102,11 @@ defmodule ClaudeAgentSdkTs.Session do
 
   @doc """
   Streams a message response via callback.
+
+  The message can be either a string or a map with `:content` for multimodal inputs.
+  See `chat/3` for details.
   """
-  @spec stream(GenServer.server(), String.t(), keyword(), function()) ::
+  @spec stream(GenServer.server(), String.t() | %{content: list()}, keyword(), function()) ::
           :ok | {:error, term()}
   def stream(session, message, opts \\ [], callback) when is_function(callback, 1) do
     GenServer.call(session, {:stream, message, opts, callback}, opts[:timeout] || 300_000)
@@ -267,19 +285,61 @@ defmodule ClaudeAgentSdkTs.Session do
     context =
       history
       |> Enum.map(fn
-        %{role: "user", content: content} -> "Human: #{content}"
+        %{role: "user", content: content} -> "Human: #{extract_text_content(content)}"
         %{role: "assistant", content: content} -> "Assistant: #{content}"
       end)
       |> Enum.join("\n\n")
 
-    """
-    Previous conversation:
-    #{context}
+    # For multimodal messages, we need to prepend history context
+    # but keep the multimodal structure intact
+    case message do
+      %{content: content_blocks} when is_list(content_blocks) ->
+        # Prepend history as a text block to the multimodal content
+        history_block = %{
+          type: "text",
+          text: """
+          Previous conversation:
+          #{context}
 
-    Current message:
-    Human: #{message}
-    """
+          Current message:
+          """
+        }
+
+        %{content: [history_block | content_blocks]}
+
+      text when is_binary(text) ->
+        """
+        Previous conversation:
+        #{context}
+
+        Current message:
+        Human: #{text}
+        """
+    end
   end
+
+  # Extract text from content that may be a string, a list of content blocks, or a map
+  defp extract_text_content(content) when is_binary(content), do: content
+
+  defp extract_text_content(content) when is_list(content) do
+    content
+    |> Enum.filter(fn
+      %{type: "text"} -> true
+      %{"type" => "text"} -> true
+      _ -> false
+    end)
+    |> Enum.map(fn
+      %{text: text} -> text
+      %{"text" => text} -> text
+    end)
+    |> Enum.join(" ")
+  end
+
+  defp extract_text_content(%{content: blocks}) when is_list(blocks) do
+    extract_text_content(blocks)
+  end
+
+  defp extract_text_content(_), do: "[non-text content]"
 
   defp stream_and_collect(prompt, bridge_opts, callback, chunks, on_complete) do
     collected = Agent.start_link(fn -> [] end)

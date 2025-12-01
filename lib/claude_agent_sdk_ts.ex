@@ -3,7 +3,7 @@ defmodule ClaudeAgentSdkTs do
   Elixir wrapper around the official TypeScript Claude Agent SDK.
 
   Provides a native Elixir interface for interacting with Claude via AWS Bedrock,
-  with support for streaming responses, sessions, and custom tools.
+  with support for streaming responses, sessions, custom tools, and multimodal inputs.
 
   ## Quick Start
 
@@ -26,6 +26,44 @@ defmodule ClaudeAgentSdkTs do
       ClaudeAgentSdkTs.stream!("Tell me a story")
       |> Stream.each(&IO.write/1)
       |> Stream.run()
+
+  ## Multimodal (Images)
+
+  Claude supports vision - you can send images along with text:
+
+      alias ClaudeAgentSdkTs.Content
+
+      # Analyze an image file
+      content = [
+        Content.text("What's in this image?"),
+        Content.image_file("screenshot.png")
+      ]
+      {:ok, response} = ClaudeAgentSdkTs.chat(%{content: content})
+
+      # Image from URL
+      content = [
+        Content.text("Describe this photo:"),
+        Content.image_url("https://example.com/photo.jpg")
+      ]
+      {:ok, response} = ClaudeAgentSdkTs.chat(%{content: content})
+
+      # Compare multiple images
+      content = Content.build([
+        "Compare these two screenshots:",
+        Content.image_file("before.png"),
+        Content.image_file("after.png"),
+        "What changed?"
+      ])
+      {:ok, response} = ClaudeAgentSdkTs.chat(%{content: content})
+
+  ### Supported Image Formats
+
+    - JPEG (`.jpg`, `.jpeg`)
+    - PNG (`.png`)
+    - GIF (`.gif`)
+    - WebP (`.webp`)
+
+  Note: PDFs are not directly supported. Convert PDF pages to images first.
 
   ## Configuration
 
@@ -72,6 +110,13 @@ defmodule ClaudeAgentSdkTs do
 
   require Logger
   alias ClaudeAgentSdkTs.{Config, PortBridge, Response, Tool}
+
+  # Re-export Content module for convenience
+  defdelegate text(text), to: ClaudeAgentSdkTs.Content
+  defdelegate image_base64(data, media_type), to: ClaudeAgentSdkTs.Content
+  defdelegate image_url(url), to: ClaudeAgentSdkTs.Content
+  defdelegate image_file(path), to: ClaudeAgentSdkTs.Content
+  defdelegate build_content(items), to: ClaudeAgentSdkTs.Content, as: :build
 
   @doc """
   Returns the path where node_modules are installed.
@@ -123,11 +168,23 @@ defmodule ClaudeAgentSdkTs do
   def install do
     deps_path = node_modules_path()
     node_modules = Path.join(deps_path, "node_modules")
+    priv = priv_path()
+    priv_node_modules = Path.join(priv, "node_modules")
 
-    if File.exists?(node_modules) do
-      :ok
-    else
-      do_install(deps_path)
+    cond do
+      not File.exists?(node_modules) ->
+        # Need full install
+        do_install(deps_path)
+
+      not File.exists?(priv_node_modules) ->
+        # node_modules installed but symlink missing (e.g., after clean rebuild)
+        Logger.info("[ClaudeAgentSdkTs] Recreating node_modules symlink...")
+        create_node_modules_symlink(priv, deps_path)
+        :ok
+
+      true ->
+        # Everything is in place
+        :ok
     end
   end
 
@@ -229,6 +286,12 @@ defmodule ClaudeAgentSdkTs do
   @doc """
   Sends a chat message to Claude and waits for the complete response.
 
+  ## Arguments
+
+  The first argument can be either:
+    - A string for simple text prompts
+    - A map with `:content` key containing a list of content blocks for multimodal inputs
+
   ## Options
 
     * `:model` - The Claude model to use
@@ -240,10 +303,19 @@ defmodule ClaudeAgentSdkTs do
 
   ## Examples
 
+      # Simple text
       {:ok, response} = ClaudeAgentSdkTs.chat("Hello!")
       {:ok, response} = ClaudeAgentSdkTs.chat("Explain OTP", model: "claude-sonnet-4-20250514")
+
+      # Multimodal with image
+      alias ClaudeAgentSdkTs.Content
+      content = [
+        Content.text("What's in this image?"),
+        Content.image_file("photo.png")
+      ]
+      {:ok, response} = ClaudeAgentSdkTs.chat(%{content: content})
   """
-  @spec chat(String.t(), chat_opts()) :: {:ok, String.t()} | {:error, term()}
+  @spec chat(String.t() | %{content: list()}, chat_opts()) :: {:ok, String.t()} | {:error, term()}
   def chat(prompt, opts \\ []) do
     config = Config.new(opts)
     bridge_opts = Config.to_bridge_opts(config)
@@ -261,7 +333,7 @@ defmodule ClaudeAgentSdkTs do
   @doc """
   Same as `chat/2` but raises on error.
   """
-  @spec chat!(String.t(), chat_opts()) :: String.t()
+  @spec chat!(String.t() | %{content: list()}, chat_opts()) :: String.t()
   def chat!(prompt, opts \\ []) do
     case chat(prompt, opts) do
       {:ok, response} -> response
@@ -272,6 +344,10 @@ defmodule ClaudeAgentSdkTs do
   @doc """
   Sends a chat message to Claude and streams the response via a callback function.
 
+  The first argument can be either:
+    - A string for simple text prompts
+    - A map with `:content` key containing a list of content blocks for multimodal inputs
+
   The callback receives maps with `:type` and `:content` keys:
 
     * `%{type: :chunk, content: "text"}` - A chunk of the response
@@ -280,13 +356,19 @@ defmodule ClaudeAgentSdkTs do
 
   ## Examples
 
+      # Text prompt
       ClaudeAgentSdkTs.stream("Write a poem", fn
         %{type: :chunk, content: text} -> IO.write(text)
         %{type: :end} -> IO.puts("")
         _ -> :ok
       end)
+
+      # Multimodal
+      alias ClaudeAgentSdkTs.Content
+      content = [Content.text("Describe this"), Content.image_file("photo.png")]
+      ClaudeAgentSdkTs.stream(%{content: content}, fn msg -> IO.inspect(msg) end)
   """
-  @spec stream(String.t(), chat_opts(), stream_callback()) :: :ok | {:error, term()}
+  @spec stream(String.t() | %{content: list()}, chat_opts(), stream_callback()) :: :ok | {:error, term()}
   def stream(prompt, opts \\ [], callback) when is_function(callback, 1) do
     config = Config.new(opts)
     bridge_opts = Config.to_bridge_opts(config)
@@ -297,12 +379,22 @@ defmodule ClaudeAgentSdkTs do
   @doc """
   Sends a chat message and returns an Elixir Stream of response chunks.
 
+  The first argument can be either:
+    - A string for simple text prompts
+    - A map with `:content` key containing a list of content blocks for multimodal inputs
+
   ## Examples
 
       ClaudeAgentSdkTs.stream!("Tell me about Erlang")
       |> Enum.each(&IO.write/1)
+
+      # Multimodal
+      alias ClaudeAgentSdkTs.Content
+      content = [Content.text("What's this?"), Content.image_file("photo.png")]
+      ClaudeAgentSdkTs.stream!(%{content: content})
+      |> Enum.each(&IO.write/1)
   """
-  @spec stream!(String.t(), chat_opts()) :: Enumerable.t()
+  @spec stream!(String.t() | %{content: list()}, chat_opts()) :: Enumerable.t()
   def stream!(prompt, opts \\ []) do
     Stream.resource(
       fn ->
