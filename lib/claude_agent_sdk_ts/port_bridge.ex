@@ -47,10 +47,47 @@ defmodule ClaudeAgentSdkTs.PortBridge do
 
   @doc """
   Sends a chat request and streams responses to the given callback or process.
+
+  Uses an activity-based timeout that resets whenever data is received from the
+  Claude API. This prevents false-positive timeouts during long-running but
+  actively streaming sessions.
+
+  ## Options
+
+    * `:timeout` - Activity timeout in milliseconds (default: 300_000 / 5 minutes).
+      The timeout resets each time a chunk, tool_use, or other message is received.
+      Only triggers if there's no activity for the specified duration.
+
   """
   @spec stream(String.t(), map(), pid() | (map() -> any())) :: :ok | {:error, term()}
   def stream(prompt, opts \\ %{}, callback) do
-    GenServer.call(__MODULE__, {:stream, prompt, opts, callback}, opts[:timeout] || 300_000)
+    timeout = opts[:timeout] || 300_000
+    ref = make_ref()
+    caller = self()
+
+    GenServer.cast(__MODULE__, {:stream, prompt, opts, callback, caller, ref})
+
+    receive_with_activity_timeout(ref, timeout)
+  end
+
+  # Waits for stream completion with an activity-based timeout.
+  # The timeout resets each time activity is received.
+  defp receive_with_activity_timeout(ref, timeout) do
+    receive do
+      {:stream_activity, ^ref} ->
+        # Activity received, reset timeout and continue waiting
+        receive_with_activity_timeout(ref, timeout)
+
+      {:stream_complete, ^ref, result} ->
+        result
+
+      {:stream_error, ^ref, error} ->
+        {:error, error}
+    after
+      timeout ->
+        # No activity for the timeout duration - truly stuck
+        {:error, :activity_timeout}
+    end
   end
 
   @doc """
@@ -98,9 +135,7 @@ defmodule ClaudeAgentSdkTs.PortBridge do
   end
 
   @impl true
-  def handle_call({:stream, prompt, opts, callback}, from, state) do
-    ref = make_ref()
-
+  def handle_cast({:stream, prompt, opts, callback, caller, ref}, state) do
     command = %{
       type: "stream",
       id: inspect(ref),
@@ -109,7 +144,8 @@ defmodule ClaudeAgentSdkTs.PortBridge do
     }
 
     send_command(state.port, command)
-    pending = Map.put(state.pending, inspect(ref), {from, :stream, callback})
+    # Store caller pid and ref for activity signaling and completion notification
+    pending = Map.put(state.pending, inspect(ref), {:stream, callback, caller, ref})
 
     {:noreply, %{state | pending: pending}}
   end
@@ -143,8 +179,14 @@ defmodule ClaudeAgentSdkTs.PortBridge do
     Logger.error("Node bridge exited with status #{status}, restarting...")
 
     # Reply to all pending requests with error
-    for {_ref, {from, _type, _data}} <- state.pending do
-      GenServer.reply(from, {:error, :bridge_crashed})
+    for {_ref, pending_data} <- state.pending do
+      case pending_data do
+        {:stream, _callback, caller, ref} ->
+          send(caller, {:stream_error, ref, :bridge_crashed})
+
+        {from, :chat, _} ->
+          GenServer.reply(from, {:error, :bridge_crashed})
+      end
     end
 
     # Restart the port
@@ -267,12 +309,16 @@ defmodule ClaudeAgentSdkTs.PortBridge do
 
   defp handle_message(%{"id" => id, "type" => "chunk", "content" => content}, state) do
     case Map.get(state.pending, id) do
-      {_from, :stream, callback} when is_function(callback) ->
+      {:stream, callback, caller, ref} when is_function(callback) ->
         callback.(%{type: :chunk, content: content})
+        # Signal activity to reset the caller's timeout
+        send(caller, {:stream_activity, ref})
         state
 
-      {_from, :stream, pid} when is_pid(pid) ->
+      {:stream, pid, caller, ref} when is_pid(pid) ->
         send(pid, {:claude_chunk, content})
+        # Signal activity to reset the caller's timeout
+        send(caller, {:stream_activity, ref})
         state
 
       {from, :chat, chunks} ->
@@ -286,14 +332,16 @@ defmodule ClaudeAgentSdkTs.PortBridge do
 
   defp handle_message(%{"id" => id, "type" => "end"}, state) do
     case Map.pop(state.pending, id) do
-      {{from, :stream, callback}, pending} when is_function(callback) ->
+      {{:stream, callback, caller, ref}, pending} when is_function(callback) ->
         callback.(%{type: :end})
-        GenServer.reply(from, :ok)
+        # Signal completion to the caller's receive loop
+        send(caller, {:stream_complete, ref, :ok})
         %{state | pending: pending}
 
-      {{from, :stream, pid}, pending} when is_pid(pid) ->
+      {{:stream, pid, caller, ref}, pending} when is_pid(pid) ->
         send(pid, :claude_end)
-        GenServer.reply(from, :ok)
+        # Signal completion to the caller's receive loop
+        send(caller, {:stream_complete, ref, :ok})
         %{state | pending: pending}
 
       {{from, :chat, chunks}, pending} ->
@@ -308,12 +356,16 @@ defmodule ClaudeAgentSdkTs.PortBridge do
 
   defp handle_message(%{"id" => id, "type" => "tool_use"} = msg, state) do
     case Map.get(state.pending, id) do
-      {_from, :stream, callback} when is_function(callback) ->
+      {:stream, callback, caller, ref} when is_function(callback) ->
         callback.(ClaudeAgentSdkTs.Response.parse(msg))
+        # Signal activity to reset the caller's timeout
+        send(caller, {:stream_activity, ref})
         state
 
-      {_from, :stream, pid} when is_pid(pid) ->
+      {:stream, pid, caller, ref} when is_pid(pid) ->
         send(pid, {:claude_tool_use, msg})
+        # Signal activity to reset the caller's timeout
+        send(caller, {:stream_activity, ref})
         state
 
       _ ->
@@ -323,7 +375,12 @@ defmodule ClaudeAgentSdkTs.PortBridge do
 
   defp handle_message(%{"id" => id, "type" => "error", "message" => message}, state) do
     case Map.pop(state.pending, id) do
-      {{from, _type, _}, pending} ->
+      {{:stream, _callback, caller, ref}, pending} ->
+        # Signal error to the caller's receive loop
+        send(caller, {:stream_error, ref, message})
+        %{state | pending: pending}
+
+      {{from, :chat, _}, pending} ->
         GenServer.reply(from, {:error, message})
         %{state | pending: pending}
 
