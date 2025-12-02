@@ -73,6 +73,11 @@ defmodule ClaudeAgentSdkTs.Session do
     - A string for simple text prompts
     - A map with `:content` key containing a list of content blocks for multimodal inputs
 
+  ## Options
+
+  Accepts all options from `ClaudeAgentSdkTs.chat/2`, including:
+    * `:can_use_tool` - Permission handler function for interactive tool approval
+
   ## Examples
 
       # Text message
@@ -82,6 +87,13 @@ defmodule ClaudeAgentSdkTs.Session do
       alias ClaudeAgentSdkTs.Content
       content = [Content.text("What's in this image?"), Content.image_file("photo.png")]
       {:ok, response} = Session.chat(session, %{content: content})
+
+      # With permission handling
+      handler = fn tool_name, _input, _opts ->
+        IO.puts("Tool: \#{tool_name}")
+        :allow
+      end
+      {:ok, response} = Session.chat(session, "List files", can_use_tool: handler)
   """
   @spec chat(GenServer.server(), String.t() | %{content: list()}, keyword()) ::
           {:ok, String.t()} | {:error, term()}
@@ -104,7 +116,25 @@ defmodule ClaudeAgentSdkTs.Session do
   Streams a message response via callback.
 
   The message can be either a string or a map with `:content` for multimodal inputs.
-  See `chat/3` for details.
+  See `chat/3` for details on message formats and options.
+
+  ## Options
+
+  Accepts all options from `ClaudeAgentSdkTs.chat/2`, including:
+    * `:can_use_tool` - Permission handler function for interactive tool approval
+
+  ## Examples
+
+      # Basic streaming
+      Session.stream(session, "Tell me a story", [], fn
+        %{type: :chunk, content: text} -> IO.write(text)
+        %{type: :end} -> IO.puts("")
+        _ -> :ok
+      end)
+
+      # With permission handling
+      handler = fn tool_name, _input, _opts -> :allow end
+      Session.stream(session, "List files", [can_use_tool: handler], &IO.inspect/1)
   """
   @spec stream(GenServer.server(), String.t() | %{content: list()}, keyword(), function()) ::
           :ok | {:error, term()}
@@ -162,8 +192,19 @@ defmodule ClaudeAgentSdkTs.Session do
 
   @impl true
   def handle_call({:chat, message, opts}, _from, state) do
+    # Extract permission handler before merging config
+    {permission_handler, opts} = Keyword.pop(opts, :can_use_tool)
+
     config = merge_config(state.config, opts)
     bridge_opts = build_bridge_opts(config, state)
+
+    # Add permission handler if provided
+    bridge_opts =
+      if is_function(permission_handler) do
+        Map.put(bridge_opts, :can_use_tool, permission_handler)
+      else
+        bridge_opts
+      end
 
     # Add conversation history context to the prompt
     prompt = build_prompt_with_history(message, state.history)
@@ -187,8 +228,20 @@ defmodule ClaudeAgentSdkTs.Session do
 
   @impl true
   def handle_call({:stream, message, opts, callback}, from, state) do
+    # Extract permission handler before merging config
+    {permission_handler, opts} = Keyword.pop(opts, :can_use_tool)
+
     config = merge_config(state.config, opts)
     bridge_opts = build_bridge_opts(config, state)
+
+    # Add permission handler if provided
+    bridge_opts =
+      if is_function(permission_handler) do
+        Map.put(bridge_opts, :can_use_tool, permission_handler)
+      else
+        bridge_opts
+      end
+
     prompt = build_prompt_with_history(message, state.history)
 
     # Collect chunks to update history after streaming completes

@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2025-12-02
+
+### Added
+
+- **Interactive permission handling (`can_use_tool`)** - Full control over tool permissions
+  - New `:can_use_tool` option for `chat/2`, `stream/3`, `Session.chat/3`, and `Session.stream/4`
+  - Mirrors TypeScript SDK's `canUseTool` callback for compatibility
+  - Handler receives `(tool_name, tool_input, opts)` with rich context including `request_id`
+  - Supports multiple return values:
+    - `:allow` / `{:allow, updated_input}` - Approve tool calls
+    - `:deny` / `{:deny, message}` - Deny with optional message
+    - `{:deny, message, interrupt: true}` - Deny and stop conversation
+    - `:pending` - Defer decision for async/interactive UIs
+  - New `respond_to_permission/2` function for async permission handling
+  - Perfect for Phoenix LiveView: return `:pending`, show modal, respond when user decides
+  - Bidirectional JSON messaging between Elixir and Node.js bridge
+  - Permission requests are processed asynchronously to prevent GenServer blocking
+  - Session module properly passes permission handler while maintaining conversation context
+
 ## [1.1.0] - 2025-12-01
 
 ### Added

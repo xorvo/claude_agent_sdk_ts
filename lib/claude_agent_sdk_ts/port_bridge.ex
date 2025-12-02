@@ -125,6 +125,88 @@ defmodule ClaudeAgentSdkTs.PortBridge do
     GenServer.cast(__MODULE__, {:tool_result, tool_use_id, result})
   end
 
+  @doc """
+  Sends a permission response back to the bridge.
+
+  This is used internally when a `can_use_tool` callback returns a decision.
+  """
+  @spec send_permission_response(String.t(), map()) :: :ok
+  def send_permission_response(request_id, response) do
+    GenServer.cast(__MODULE__, {:permission_response, request_id, response})
+  end
+
+  @doc """
+  Responds to a pending permission request.
+
+  Use this when your `can_use_tool` handler returns `:pending` to defer the decision.
+  This is particularly useful for interactive UIs like Phoenix LiveView where you need
+  to show a modal and wait for user input.
+
+  ## Arguments
+
+    * `request_id` - The request ID from `opts.request_id` in the handler
+    * `decision` - One of the standard permission responses:
+      * `:allow` - Approve the tool call
+      * `{:allow, updated_input}` - Approve with modified input
+      * `{:allow, updated_input, updated_permissions}` - Approve with modified input and permissions
+      * `:deny` - Deny the tool call
+      * `{:deny, message}` - Deny with a message
+      * `{:deny, message, interrupt: true}` - Deny and stop the conversation
+
+  ## Example
+
+      # In your permission handler, return :pending and notify the UI
+      handler = fn tool_name, tool_input, opts ->
+        send(liveview_pid, {:permission_request, opts.request_id, tool_name, tool_input})
+        :pending
+      end
+
+      # Later, when the user clicks "Allow" or "Deny" in the UI
+      def handle_event("allow_tool", %{"request_id" => request_id}, socket) do
+        ClaudeAgentSdkTs.PortBridge.respond_to_permission(request_id, :allow)
+        {:noreply, socket}
+      end
+
+      def handle_event("deny_tool", %{"request_id" => request_id}, socket) do
+        ClaudeAgentSdkTs.PortBridge.respond_to_permission(request_id, {:deny, "User declined"})
+        {:noreply, socket}
+      end
+  """
+  @spec respond_to_permission(String.t(), term()) :: :ok
+  def respond_to_permission(request_id, decision) do
+    response = build_permission_response_public(decision)
+    send_permission_response(request_id, response)
+  end
+
+  # Public version of build_permission_response for respond_to_permission
+  defp build_permission_response_public({:allow, updated_input}) do
+    %{behavior: "allow", updatedInput: updated_input}
+  end
+
+  defp build_permission_response_public({:allow, updated_input, updated_permissions}) do
+    %{behavior: "allow", updatedInput: updated_input, updatedPermissions: updated_permissions}
+  end
+
+  defp build_permission_response_public(:allow) do
+    %{behavior: "allow", updatedInput: %{}}
+  end
+
+  defp build_permission_response_public({:deny, message}) do
+    %{behavior: "deny", message: message, interrupt: false}
+  end
+
+  defp build_permission_response_public({:deny, message, opts}) when is_list(opts) do
+    %{
+      behavior: "deny",
+      message: message,
+      interrupt: Keyword.get(opts, :interrupt, false)
+    }
+  end
+
+  defp build_permission_response_public(:deny) do
+    %{behavior: "deny", message: "Permission denied", interrupt: false}
+  end
+
   # Server Callbacks
 
   @impl true
@@ -148,6 +230,9 @@ defmodule ClaudeAgentSdkTs.PortBridge do
   def handle_call({:chat, prompt, opts}, from, state) do
     ref = make_ref()
 
+    # Extract permission handler from opts (if provided)
+    {permission_handler, bridge_opts} = extract_permission_handler(opts)
+
     command =
       case prompt do
         %{content: content} when is_list(content) ->
@@ -155,7 +240,7 @@ defmodule ClaudeAgentSdkTs.PortBridge do
             type: "chat",
             id: inspect(ref),
             content: content,
-            options: opts
+            options: bridge_opts
           }
 
         prompt when is_binary(prompt) ->
@@ -163,18 +248,21 @@ defmodule ClaudeAgentSdkTs.PortBridge do
             type: "chat",
             id: inspect(ref),
             prompt: prompt,
-            options: opts
+            options: bridge_opts
           }
       end
 
     send_command(state.port, command)
-    pending = Map.put(state.pending, inspect(ref), {from, :chat, []})
+    pending = Map.put(state.pending, inspect(ref), {from, :chat, [], permission_handler})
 
     {:noreply, %{state | pending: pending}}
   end
 
   @impl true
   def handle_cast({:stream, prompt, opts, callback, caller, ref}, state) do
+    # Extract permission handler from opts (if provided)
+    {permission_handler, bridge_opts} = extract_permission_handler(opts)
+
     command =
       case prompt do
         %{content: content} when is_list(content) ->
@@ -182,7 +270,7 @@ defmodule ClaudeAgentSdkTs.PortBridge do
             type: "stream",
             id: inspect(ref),
             content: content,
-            options: opts
+            options: bridge_opts
           }
 
         prompt when is_binary(prompt) ->
@@ -190,13 +278,13 @@ defmodule ClaudeAgentSdkTs.PortBridge do
             type: "stream",
             id: inspect(ref),
             prompt: prompt,
-            options: opts
+            options: bridge_opts
           }
       end
 
     send_command(state.port, command)
     # Store caller pid and ref for activity signaling and completion notification
-    pending = Map.put(state.pending, inspect(ref), {:stream, callback, caller, ref})
+    pending = Map.put(state.pending, inspect(ref), {:stream, callback, caller, ref, permission_handler})
 
     {:noreply, %{state | pending: pending}}
   end
@@ -208,6 +296,21 @@ defmodule ClaudeAgentSdkTs.PortBridge do
       toolUseId: tool_use_id,
       result: result
     }
+
+    send_command(state.port, command)
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_cast({:permission_response, request_id, response}, state) do
+    command =
+      Map.merge(
+        %{
+          type: "permission_response",
+          requestId: request_id
+        },
+        response
+      )
 
     send_command(state.port, command)
     {:noreply, state}
@@ -349,7 +452,7 @@ defmodule ClaudeAgentSdkTs.PortBridge do
 
   defp handle_message(%{"id" => id, "type" => "complete", "content" => content}, state) do
     case Map.pop(state.pending, id) do
-      {{from, :chat, _}, pending} ->
+      {{from, :chat, _, _handler}, pending} ->
         GenServer.reply(from, {:ok, content})
         %{state | pending: pending}
 
@@ -360,20 +463,20 @@ defmodule ClaudeAgentSdkTs.PortBridge do
 
   defp handle_message(%{"id" => id, "type" => "chunk", "content" => content}, state) do
     case Map.get(state.pending, id) do
-      {:stream, callback, caller, ref} when is_function(callback) ->
+      {:stream, callback, caller, ref, _handler} when is_function(callback) ->
         callback.(%{type: :chunk, content: content})
         # Signal activity to reset the caller's timeout
         send(caller, {:stream_activity, ref})
         state
 
-      {:stream, pid, caller, ref} when is_pid(pid) ->
+      {:stream, pid, caller, ref, _handler} when is_pid(pid) ->
         send(pid, {:claude_chunk, content})
         # Signal activity to reset the caller's timeout
         send(caller, {:stream_activity, ref})
         state
 
-      {from, :chat, chunks} ->
-        pending = Map.put(state.pending, id, {from, :chat, [content | chunks]})
+      {from, :chat, chunks, handler} ->
+        pending = Map.put(state.pending, id, {from, :chat, [content | chunks], handler})
         %{state | pending: pending}
 
       _ ->
@@ -383,19 +486,19 @@ defmodule ClaudeAgentSdkTs.PortBridge do
 
   defp handle_message(%{"id" => id, "type" => "end"}, state) do
     case Map.pop(state.pending, id) do
-      {{:stream, callback, caller, ref}, pending} when is_function(callback) ->
+      {{:stream, callback, caller, ref, _handler}, pending} when is_function(callback) ->
         callback.(%{type: :end})
         # Signal completion to the caller's receive loop
         send(caller, {:stream_complete, ref, :ok})
         %{state | pending: pending}
 
-      {{:stream, pid, caller, ref}, pending} when is_pid(pid) ->
+      {{:stream, pid, caller, ref, _handler}, pending} when is_pid(pid) ->
         send(pid, :claude_end)
         # Signal completion to the caller's receive loop
         send(caller, {:stream_complete, ref, :ok})
         %{state | pending: pending}
 
-      {{from, :chat, chunks}, pending} ->
+      {{from, :chat, chunks, _handler}, pending} ->
         content = chunks |> Enum.reverse() |> Enum.join("")
         GenServer.reply(from, {:ok, content})
         %{state | pending: pending}
@@ -407,13 +510,13 @@ defmodule ClaudeAgentSdkTs.PortBridge do
 
   defp handle_message(%{"id" => id, "type" => "tool_use"} = msg, state) do
     case Map.get(state.pending, id) do
-      {:stream, callback, caller, ref} when is_function(callback) ->
+      {:stream, callback, caller, ref, _handler} when is_function(callback) ->
         callback.(ClaudeAgentSdkTs.Response.parse(msg))
         # Signal activity to reset the caller's timeout
         send(caller, {:stream_activity, ref})
         state
 
-      {:stream, pid, caller, ref} when is_pid(pid) ->
+      {:stream, pid, caller, ref, _handler} when is_pid(pid) ->
         send(pid, {:claude_tool_use, msg})
         # Signal activity to reset the caller's timeout
         send(caller, {:stream_activity, ref})
@@ -426,12 +529,12 @@ defmodule ClaudeAgentSdkTs.PortBridge do
 
   defp handle_message(%{"id" => id, "type" => "error", "message" => message}, state) do
     case Map.pop(state.pending, id) do
-      {{:stream, _callback, caller, ref}, pending} ->
+      {{:stream, _callback, caller, ref, _handler}, pending} ->
         # Signal error to the caller's receive loop
         send(caller, {:stream_error, ref, message})
         %{state | pending: pending}
 
-      {{from, :chat, _}, pending} ->
+      {{from, :chat, _, _handler}, pending} ->
         GenServer.reply(from, {:error, message})
         %{state | pending: pending}
 
@@ -440,5 +543,121 @@ defmodule ClaudeAgentSdkTs.PortBridge do
     end
   end
 
+  defp handle_message(
+         %{
+           "id" => id,
+           "type" => "permission_request",
+           "requestId" => request_id,
+           "toolName" => tool_name,
+           "toolInput" => tool_input
+         } = msg,
+         state
+       ) do
+    # Get the permission handler from pending state (last element of tuple)
+    permission_handler =
+      case Map.get(state.pending, id) do
+        {:stream, _callback, _caller, _ref, handler} when is_function(handler) -> handler
+        {_from, :chat, _chunks, handler} when is_function(handler) -> handler
+        _ -> nil
+      end
+
+    if permission_handler do
+      # Build options map matching the TypeScript SDK signature
+      # Include request_id so handlers can return :pending and respond later
+      opts = %{
+        request_id: request_id,
+        suggestions: msg["suggestions"] || [],
+        blocked_path: msg["blockedPath"],
+        decision_reason: msg["decisionReason"],
+        tool_use_id: msg["toolUseId"],
+        agent_id: msg["agentId"]
+      }
+
+      # Spawn a task to handle the permission callback asynchronously
+      # This prevents blocking the GenServer
+      Task.start(fn ->
+        try do
+          result = permission_handler.(tool_name, tool_input, opts)
+
+          # Handle :pending - the handler will call respond_to_permission later
+          case result do
+            :pending ->
+              Logger.debug("[PortBridge] Permission handler returned :pending for #{request_id}")
+              :ok
+
+            _ ->
+              response = build_permission_response(result)
+              send_permission_response(request_id, response)
+          end
+        rescue
+          e ->
+            Logger.error("[PortBridge] Permission handler error: #{inspect(e)}")
+
+            send_permission_response(request_id, %{
+              behavior: "deny",
+              message: "Permission handler error: #{inspect(e)}",
+              interrupt: true
+            })
+        end
+      end)
+    else
+      # No permission handler - deny by default
+      Logger.warning("[PortBridge] No permission handler for request #{request_id}")
+
+      send_permission_response(request_id, %{
+        behavior: "deny",
+        message: "No permission handler configured",
+        interrupt: true
+      })
+    end
+
+    state
+  end
+
   defp handle_message(_msg, state), do: state
+
+  # Convert Elixir permission result to bridge format
+  defp build_permission_response({:allow, updated_input}) do
+    %{behavior: "allow", updatedInput: updated_input}
+  end
+
+  defp build_permission_response({:allow, updated_input, updated_permissions}) do
+    %{behavior: "allow", updatedInput: updated_input, updatedPermissions: updated_permissions}
+  end
+
+  defp build_permission_response(:allow) do
+    %{behavior: "allow", updatedInput: %{}}
+  end
+
+  defp build_permission_response({:deny, message}) do
+    %{behavior: "deny", message: message, interrupt: false}
+  end
+
+  defp build_permission_response({:deny, message, opts}) do
+    %{
+      behavior: "deny",
+      message: message,
+      interrupt: Keyword.get(opts, :interrupt, false)
+    }
+  end
+
+  defp build_permission_response(:deny) do
+    %{behavior: "deny", message: "Permission denied", interrupt: false}
+  end
+
+  # Extract can_use_tool handler from opts and prepare bridge options
+  defp extract_permission_handler(opts) when is_map(opts) do
+    {handler, rest} = Map.pop(opts, :can_use_tool)
+
+    bridge_opts =
+      if is_function(handler) do
+        Map.put(rest, :interactivePermissions, true)
+      else
+        rest
+      end
+
+    {handler, bridge_opts}
+  end
+
+  defp extract_permission_handler(opts), do: {nil, opts}
 end

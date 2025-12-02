@@ -4,13 +4,17 @@
  * This script communicates with Elixir via stdin/stdout using newline-delimited JSON.
  * It wraps the official @anthropic-ai/claude-agent-sdk.
  *
- * Supports multimodal inputs (images) via structured content blocks.
+ * Supports:
+ * - Multimodal inputs (images) via structured content blocks
+ * - Interactive permission handling via canUseTool callback
  */
 import * as readline from "readline";
 import { randomUUID } from "crypto";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 // Debug logging - writes to stderr so it doesn't interfere with JSON protocol on stdout
 const DEBUG = process.env.CLAUDE_AGENT_DEBUG === "1";
+// Store pending permission requests waiting for responses from Elixir
+const pendingPermissions = new Map();
 function debug(msg, data) {
     if (DEBUG) {
         const timestamp = new Date().toISOString();
@@ -94,8 +98,65 @@ function buildPrompt(command) {
     // Otherwise, use the simple string prompt
     return prompt;
 }
+/**
+ * Create a canUseTool callback that sends permission requests to Elixir
+ * and waits for responses.
+ *
+ * @param {string} commandId - The ID of the chat/stream command
+ * @returns {Function} The canUseTool callback function
+ */
+function createCanUseToolCallback(commandId) {
+    return async (toolName, input, options) => {
+        const requestId = randomUUID();
+        debug("canUseTool called", { toolName, requestId, toolUseID: options.toolUseID });
+        // Send permission request to Elixir
+        send({
+            id: commandId,
+            type: "permission_request",
+            requestId: requestId,
+            toolName: toolName,
+            toolInput: input,
+            toolUseId: options.toolUseID,
+            agentId: options.agentID || null,
+            suggestions: options.suggestions || [],
+            blockedPath: options.blockedPath || null,
+            decisionReason: options.decisionReason || null,
+        });
+        // Wait for response from Elixir (no timeout - matches TypeScript SDK behavior)
+        return new Promise((resolve, reject) => {
+            pendingPermissions.set(requestId, { resolve, reject });
+        });
+    };
+}
+/**
+ * Handle a permission response from Elixir
+ */
+function handlePermissionResponse(response) {
+    const { requestId, behavior, updatedInput, updatedPermissions, message, interrupt } = response;
+    debug("Handling permission response", { requestId, behavior });
+    const pending = pendingPermissions.get(requestId);
+    if (!pending) {
+        debug("No pending permission request found for requestId", { requestId });
+        return;
+    }
+    pendingPermissions.delete(requestId);
+    if (behavior === "allow") {
+        pending.resolve({
+            behavior: "allow",
+            updatedInput: updatedInput || {},
+            updatedPermissions: updatedPermissions,
+        });
+    }
+    else {
+        pending.resolve({
+            behavior: "deny",
+            message: message || "Permission denied",
+            interrupt: interrupt || false,
+        });
+    }
+}
 // Build SDK options from command options
-function buildOptions(opts = {}) {
+function buildOptions(opts = {}, commandId = null) {
     const sdkOptions = {};
     if (opts.model)
         sdkOptions.model = opts.model;
@@ -113,9 +174,20 @@ function buildOptions(opts = {}) {
         sdkOptions.permissionMode = opts.permissionMode;
     if (opts.systemPrompt)
         sdkOptions.systemPrompt = opts.systemPrompt;
-    // Default to bypassing permissions for SDK usage (non-interactive)
-    if (!sdkOptions.permissionMode) {
-        sdkOptions.permissionMode = "bypassPermissions";
+    // If interactive permissions are enabled, set up the canUseTool callback
+    if (opts.interactivePermissions && commandId) {
+        debug("Enabling interactive permissions for command", { commandId });
+        sdkOptions.canUseTool = createCanUseToolCallback(commandId);
+        // Don't bypass permissions when interactive mode is enabled
+        if (!opts.permissionMode) {
+            sdkOptions.permissionMode = "default";
+        }
+    }
+    else {
+        // Default to bypassing permissions for SDK usage (non-interactive)
+        if (!sdkOptions.permissionMode) {
+            sdkOptions.permissionMode = "bypassPermissions";
+        }
     }
     return sdkOptions;
 }
@@ -125,7 +197,7 @@ async function handleChat(command) {
     const promptPreview = prompt ? prompt.slice(0, 100) : `[multimodal: ${content?.length || 0} blocks]`;
     debug(`handleChat called`, { id, prompt: promptPreview, options });
     try {
-        const sdkOptions = buildOptions(options);
+        const sdkOptions = buildOptions(options, id);
         debug("SDK options built", sdkOptions);
         debug("Calling query()...");
         const promptParam = buildPrompt(command);
@@ -176,7 +248,7 @@ async function handleStream(command) {
     const promptPreview = prompt ? prompt.slice(0, 100) : `[multimodal: ${content?.length || 0} blocks]`;
     debug(`handleStream called`, { id, prompt: promptPreview, options });
     try {
-        const sdkOptions = buildOptions(options);
+        const sdkOptions = buildOptions(options, id);
         debug("SDK options built for stream", sdkOptions);
         // Enable partial messages for streaming
         sdkOptions.includePartialMessages = true;
@@ -288,6 +360,10 @@ async function main() {
             case "stream":
                 debug("Dispatching to handleStream");
                 await handleStream(command);
+                break;
+            case "permission_response":
+                debug("Handling permission response");
+                handlePermissionResponse(command);
                 break;
             case "tool_result":
                 send({

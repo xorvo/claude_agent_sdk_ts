@@ -272,13 +272,24 @@ defmodule ClaudeAgentSdkTs do
     end
   end
 
+  @type permission_handler ::
+          (tool_name :: String.t(), tool_input :: map(), opts :: map() ->
+             :allow
+             | {:allow, updated_input :: map()}
+             | {:allow, updated_input :: map(), updated_permissions :: map()}
+             | :deny
+             | {:deny, message :: String.t()}
+             | {:deny, message :: String.t(), [interrupt: boolean()]}
+             | :pending)
+
   @type chat_opts :: [
           model: String.t(),
           max_tokens: pos_integer(),
           system_prompt: String.t(),
           timeout: pos_integer(),
           tools: [Tool.t()],
-          cwd: String.t()
+          cwd: String.t(),
+          can_use_tool: permission_handler()
         ]
 
   @type stream_callback :: (Response.t() | map() -> any())
@@ -300,6 +311,31 @@ defmodule ClaudeAgentSdkTs do
     * `:timeout` - Request timeout in milliseconds (default: 300_000)
     * `:tools` - List of `ClaudeAgentSdkTs.Tool` structs Claude can invoke
     * `:cwd` - Working directory for file operations
+    * `:can_use_tool` - Permission handler function for interactive tool approval (see below)
+
+  ## Interactive Permission Handling
+
+  The `:can_use_tool` option enables interactive approval of tool usage. When provided,
+  Claude will ask for permission before executing tools. This mirrors the TypeScript SDK's
+  `canUseTool` callback.
+
+  The handler receives `(tool_name, tool_input, opts)` and should return one of:
+
+    * `:allow` - Approve the tool call
+    * `{:allow, updated_input}` - Approve with modified input
+    * `{:allow, updated_input, updated_permissions}` - Approve with modified input and permissions
+    * `:deny` - Deny the tool call
+    * `{:deny, message}` - Deny with a message (Claude sees the reason)
+    * `{:deny, message, interrupt: true}` - Deny and stop the conversation
+    * `:pending` - Defer the decision; respond later via `respond_to_permission/2`
+
+  The `opts` map contains:
+    * `:request_id` - Unique identifier for this permission request (use with `respond_to_permission/2`)
+    * `:tool_use_id` - Unique identifier for this tool invocation
+    * `:agent_id` - Agent identifier (if using sub-agents)
+    * `:suggestions` - Suggested next actions
+    * `:blocked_path` - Path that would be affected (for file operations)
+    * `:decision_reason` - Why this permission check is happening
 
   ## Examples
 
@@ -314,6 +350,22 @@ defmodule ClaudeAgentSdkTs do
         Content.image_file("photo.png")
       ]
       {:ok, response} = ClaudeAgentSdkTs.chat(%{content: content})
+
+      # With interactive permission handling
+      handler = fn tool_name, tool_input, _opts ->
+        IO.puts("Claude wants to use: \#{tool_name}")
+        IO.inspect(tool_input, label: "Input")
+
+        case IO.gets("Allow? (y/n): ") |> String.trim() do
+          "y" -> :allow
+          _ -> {:deny, "User declined"}
+        end
+      end
+
+      {:ok, response} = ClaudeAgentSdkTs.chat(
+        "Create a file called test.txt with 'Hello World'",
+        can_use_tool: handler
+      )
   """
   @spec chat(String.t() | %{content: list()}, chat_opts()) :: {:ok, String.t()} | {:error, term()}
   def chat(prompt, opts \\ []) do
@@ -325,6 +377,13 @@ defmodule ClaudeAgentSdkTs do
       case Keyword.get(opts, :tools) do
         nil -> bridge_opts
         tools -> Map.put(bridge_opts, "tools", Enum.map(tools, &Tool.to_definition/1))
+      end
+
+    # Add permission handler if provided
+    bridge_opts =
+      case Keyword.get(opts, :can_use_tool) do
+        nil -> bridge_opts
+        handler when is_function(handler) -> Map.put(bridge_opts, :can_use_tool, handler)
       end
 
     PortBridge.chat(prompt, bridge_opts)
@@ -354,6 +413,11 @@ defmodule ClaudeAgentSdkTs do
     * `%{type: :tool_use, ...}` - Claude wants to use a tool
     * `%{type: :end}` - Stream has ended
 
+  ## Options
+
+  See `chat/2` for all available options including `:can_use_tool` for interactive
+  permission handling.
+
   ## Examples
 
       # Text prompt
@@ -367,11 +431,25 @@ defmodule ClaudeAgentSdkTs do
       alias ClaudeAgentSdkTs.Content
       content = [Content.text("Describe this"), Content.image_file("photo.png")]
       ClaudeAgentSdkTs.stream(%{content: content}, fn msg -> IO.inspect(msg) end)
+
+      # With permission handling
+      handler = fn tool_name, _input, _opts ->
+        IO.puts("Tool: \#{tool_name}")
+        :allow
+      end
+      ClaudeAgentSdkTs.stream("List files", [can_use_tool: handler], &IO.inspect/1)
   """
   @spec stream(String.t() | %{content: list()}, chat_opts(), stream_callback()) :: :ok | {:error, term()}
   def stream(prompt, opts \\ [], callback) when is_function(callback, 1) do
     config = Config.new(opts)
     bridge_opts = Config.to_bridge_opts(config)
+
+    # Add permission handler if provided
+    bridge_opts =
+      case Keyword.get(opts, :can_use_tool) do
+        nil -> bridge_opts
+        handler when is_function(handler) -> Map.put(bridge_opts, :can_use_tool, handler)
+      end
 
     PortBridge.stream(prompt, bridge_opts, callback)
   end
@@ -448,4 +526,55 @@ defmodule ClaudeAgentSdkTs do
   def start_session(opts \\ []) do
     ClaudeAgentSdkTs.Session.start_link(opts)
   end
+
+  @doc """
+  Responds to a pending permission request.
+
+  Use this when your `can_use_tool` handler returns `:pending` to defer the decision.
+  This is particularly useful for interactive UIs like Phoenix LiveView where you need
+  to show a modal and wait for user input.
+
+  See `ClaudeAgentSdkTs.PortBridge.respond_to_permission/2` for full documentation.
+
+  ## Example: Phoenix LiveView
+
+      # In your chat component's mount or handle_params
+      def mount(_params, _session, socket) do
+        handler = fn tool_name, tool_input, opts ->
+          # Send permission request to LiveView process
+          send(self(), {:permission_request, opts.request_id, tool_name, tool_input})
+          :pending  # Tell SDK we'll respond later
+        end
+
+        {:ok, assign(socket, can_use_tool: handler, pending_permission: nil)}
+      end
+
+      # Handle incoming permission requests
+      def handle_info({:permission_request, request_id, tool_name, tool_input}, socket) do
+        {:noreply, assign(socket,
+          pending_permission: %{
+            request_id: request_id,
+            tool_name: tool_name,
+            tool_input: tool_input
+          }
+        )}
+      end
+
+      # Handle user clicking "Allow"
+      def handle_event("allow_tool", _params, socket) do
+        ClaudeAgentSdkTs.respond_to_permission(socket.assigns.pending_permission.request_id, :allow)
+        {:noreply, assign(socket, pending_permission: nil)}
+      end
+
+      # Handle user clicking "Deny"
+      def handle_event("deny_tool", _params, socket) do
+        ClaudeAgentSdkTs.respond_to_permission(
+          socket.assigns.pending_permission.request_id,
+          {:deny, "User declined"}
+        )
+        {:noreply, assign(socket, pending_permission: nil)}
+      end
+  """
+  @spec respond_to_permission(String.t(), term()) :: :ok
+  defdelegate respond_to_permission(request_id, decision), to: PortBridge
 end

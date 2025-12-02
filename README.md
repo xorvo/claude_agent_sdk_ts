@@ -66,6 +66,7 @@ Or pass options directly to function calls.
 | `allowed_tools` | list | List of allowed tool names |
 | `disallowed_tools` | list | List of disallowed tool names |
 | `permission_mode` | atom | Permission mode (see below) |
+| `can_use_tool` | function | Interactive permission handler (see below) |
 
 ### Permission Modes
 
@@ -74,6 +75,146 @@ Or pass options directly to function calls.
 - `:bypass_permissions` - Skip all permission prompts (default)
 - `:plan` - Planning mode, no tool execution
 - `:dont_ask` - Don't ask for permissions, deny if not pre-approved
+
+### Interactive Permission Handling (can_use_tool)
+
+For full control over tool permissions, you can provide a `can_use_tool` callback function.
+This mirrors the TypeScript SDK's `canUseTool` callback and is called whenever Claude wants
+to use a tool.
+
+```elixir
+# Define a permission handler
+handler = fn tool_name, tool_input, opts ->
+  IO.puts("Claude wants to use: #{tool_name}")
+  IO.inspect(tool_input, label: "Input")
+
+  # opts contains additional context:
+  # - :tool_use_id - unique identifier for this invocation
+  # - :agent_id - agent identifier (for sub-agents)
+  # - :blocked_path - path that would be affected (for file ops)
+  # - :suggestions - suggested actions
+  # - :decision_reason - why this check is happening
+
+  case IO.gets("Allow? (y/n): ") |> String.trim() do
+    "y" -> :allow
+    _ -> {:deny, "User declined"}
+  end
+end
+
+# Use with chat
+{:ok, response} = ClaudeAgentSdkTs.chat(
+  "Create a file called test.txt",
+  can_use_tool: handler
+)
+
+# Or with streaming
+ClaudeAgentSdkTs.stream("List files in current directory", [can_use_tool: handler], fn msg ->
+  IO.inspect(msg)
+end)
+```
+
+#### Handler Return Values
+
+| Return | Effect |
+|--------|--------|
+| `:allow` | Approve the tool call |
+| `{:allow, updated_input}` | Approve with modified input |
+| `{:allow, updated_input, updated_permissions}` | Approve with modified input and permissions |
+| `:deny` | Deny the tool call |
+| `{:deny, message}` | Deny with a message (Claude sees the reason) |
+| `{:deny, message, interrupt: true}` | Deny and stop the conversation |
+| `:pending` | Defer the decision; respond later via `respond_to_permission/2` |
+
+#### Async Permission Handling (Phoenix LiveView)
+
+For interactive UIs like Phoenix LiveView, you can return `:pending` from your handler
+and respond later when the user makes a decision:
+
+```elixir
+defmodule MyAppWeb.ChatLive do
+  use Phoenix.LiveView
+
+  def mount(_params, _session, socket) do
+    # Create a handler that defers decisions to the UI
+    handler = fn tool_name, tool_input, opts ->
+      # Send permission request to this LiveView process
+      send(self(), {:permission_request, opts.request_id, tool_name, tool_input})
+      :pending  # Tell SDK we'll respond later
+    end
+
+    {:ok, assign(socket, handler: handler, pending_permission: nil)}
+  end
+
+  # Handle incoming permission requests - show a modal
+  def handle_info({:permission_request, request_id, tool_name, tool_input}, socket) do
+    {:noreply, assign(socket,
+      pending_permission: %{
+        request_id: request_id,
+        tool_name: tool_name,
+        tool_input: tool_input
+      }
+    )}
+  end
+
+  # User clicked "Allow"
+  def handle_event("allow_tool", _params, socket) do
+    ClaudeAgentSdkTs.respond_to_permission(
+      socket.assigns.pending_permission.request_id,
+      :allow
+    )
+    {:noreply, assign(socket, pending_permission: nil)}
+  end
+
+  # User clicked "Deny"
+  def handle_event("deny_tool", _params, socket) do
+    ClaudeAgentSdkTs.respond_to_permission(
+      socket.assigns.pending_permission.request_id,
+      {:deny, "User declined"}
+    )
+    {:noreply, assign(socket, pending_permission: nil)}
+  end
+end
+```
+
+The `opts.request_id` is a unique identifier for each permission request. Store it
+and pass it to `respond_to_permission/2` when the user makes their decision.
+
+#### Example: Auto-approve Read, Confirm Write
+
+```elixir
+handler = fn tool_name, tool_input, _opts ->
+  case tool_name do
+    "Read" ->
+      # Always allow reading files
+      :allow
+
+    "Write" ->
+      path = tool_input["file_path"]
+      IO.puts("Claude wants to write to: #{path}")
+
+      if String.starts_with?(path, "/tmp/") do
+        :allow
+      else
+        {:deny, "Only /tmp/ writes allowed"}
+      end
+
+    "Bash" ->
+      # Inspect bash commands before allowing
+      command = tool_input["command"]
+      IO.puts("Bash command: #{command}")
+
+      if String.contains?(command, "rm -rf") do
+        {:deny, "Dangerous command blocked", interrupt: true}
+      else
+        :allow
+      end
+
+    _ ->
+      # Default: deny unknown tools
+      {:deny, "Unknown tool: #{tool_name}"}
+  end
+end
+```
 
 ## Quick Start
 

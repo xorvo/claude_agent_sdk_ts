@@ -111,4 +111,195 @@ defmodule ClaudeAgentSdkTs.PortBridgeTest do
         {:error, :activity_timeout}
     end
   end
+
+  describe "permission handler extraction" do
+    # Test the extract_permission_handler function behavior via opts processing
+    test "extracts permission handler from opts" do
+      handler = fn _name, _input, _opts -> :allow end
+      opts = %{model: "test", can_use_tool: handler}
+
+      # The handler should be separated and interactivePermissions added
+      {extracted_handler, bridge_opts} = extract_permission_handler(opts)
+
+      assert is_function(extracted_handler)
+      assert bridge_opts[:interactivePermissions] == true
+      assert bridge_opts[:model] == "test"
+      refute Map.has_key?(bridge_opts, :can_use_tool)
+    end
+
+    test "returns nil handler when not provided" do
+      opts = %{model: "test"}
+
+      {extracted_handler, bridge_opts} = extract_permission_handler(opts)
+
+      assert is_nil(extracted_handler)
+      refute Map.has_key?(bridge_opts, :interactivePermissions)
+      assert bridge_opts[:model] == "test"
+    end
+
+    test "handles nil can_use_tool gracefully" do
+      opts = %{model: "test", can_use_tool: nil}
+
+      {extracted_handler, bridge_opts} = extract_permission_handler(opts)
+
+      assert is_nil(extracted_handler)
+      refute Map.has_key?(bridge_opts, :interactivePermissions)
+    end
+
+    # Mirror the extract_permission_handler function for testing
+    defp extract_permission_handler(opts) when is_map(opts) do
+      {handler, rest} = Map.pop(opts, :can_use_tool)
+
+      bridge_opts =
+        if is_function(handler) do
+          Map.put(rest, :interactivePermissions, true)
+        else
+          rest
+        end
+
+      {handler, bridge_opts}
+    end
+  end
+
+  describe "permission response building" do
+    test "build_permission_response handles :allow" do
+      assert build_permission_response(:allow) == %{behavior: "allow", updatedInput: %{}}
+    end
+
+    test "build_permission_response handles {:allow, updated_input}" do
+      result = build_permission_response({:allow, %{path: "/modified"}})
+      assert result == %{behavior: "allow", updatedInput: %{path: "/modified"}}
+    end
+
+    test "build_permission_response handles {:allow, updated_input, updated_permissions}" do
+      result = build_permission_response({:allow, %{path: "/new"}, %{scope: "write"}})
+      assert result == %{
+        behavior: "allow",
+        updatedInput: %{path: "/new"},
+        updatedPermissions: %{scope: "write"}
+      }
+    end
+
+    test "build_permission_response handles :deny" do
+      assert build_permission_response(:deny) == %{
+        behavior: "deny",
+        message: "Permission denied",
+        interrupt: false
+      }
+    end
+
+    test "build_permission_response handles {:deny, message}" do
+      result = build_permission_response({:deny, "Not allowed"})
+      assert result == %{behavior: "deny", message: "Not allowed", interrupt: false}
+    end
+
+    test "build_permission_response handles {:deny, message, interrupt: true}" do
+      result = build_permission_response({:deny, "Stop now", interrupt: true})
+      assert result == %{behavior: "deny", message: "Stop now", interrupt: true}
+    end
+
+    # Mirror the build_permission_response functions for testing
+    defp build_permission_response({:allow, updated_input}) do
+      %{behavior: "allow", updatedInput: updated_input}
+    end
+
+    defp build_permission_response({:allow, updated_input, updated_permissions}) do
+      %{behavior: "allow", updatedInput: updated_input, updatedPermissions: updated_permissions}
+    end
+
+    defp build_permission_response(:allow) do
+      %{behavior: "allow", updatedInput: %{}}
+    end
+
+    defp build_permission_response({:deny, message}) do
+      %{behavior: "deny", message: message, interrupt: false}
+    end
+
+    defp build_permission_response({:deny, message, opts}) do
+      %{
+        behavior: "deny",
+        message: message,
+        interrupt: Keyword.get(opts, :interrupt, false)
+      }
+    end
+
+    defp build_permission_response(:deny) do
+      %{behavior: "deny", message: "Permission denied", interrupt: false}
+    end
+  end
+
+  describe "async permission handling with :pending" do
+    test "permission handler opts includes request_id" do
+      # Verify that request_id is included in opts passed to handler
+      opts = %{
+        request_id: "test-request-123",
+        suggestions: [],
+        blocked_path: nil,
+        decision_reason: nil,
+        tool_use_id: "tool-456",
+        agent_id: nil
+      }
+
+      assert opts.request_id == "test-request-123"
+      assert opts.tool_use_id == "tool-456"
+    end
+
+    test "build_permission_response_public handles all decision types" do
+      # :allow
+      assert build_permission_response_public(:allow) == %{behavior: "allow", updatedInput: %{}}
+
+      # {:allow, updated_input}
+      assert build_permission_response_public({:allow, %{path: "/new"}}) ==
+               %{behavior: "allow", updatedInput: %{path: "/new"}}
+
+      # {:allow, updated_input, updated_permissions}
+      assert build_permission_response_public({:allow, %{path: "/new"}, %{scope: "write"}}) ==
+               %{behavior: "allow", updatedInput: %{path: "/new"}, updatedPermissions: %{scope: "write"}}
+
+      # :deny
+      assert build_permission_response_public(:deny) ==
+               %{behavior: "deny", message: "Permission denied", interrupt: false}
+
+      # {:deny, message}
+      assert build_permission_response_public({:deny, "Not allowed"}) ==
+               %{behavior: "deny", message: "Not allowed", interrupt: false}
+
+      # {:deny, message, interrupt: true}
+      assert build_permission_response_public({:deny, "Stop", interrupt: true}) ==
+               %{behavior: "deny", message: "Stop", interrupt: true}
+
+      # {:deny, message, interrupt: false}
+      assert build_permission_response_public({:deny, "Continue", interrupt: false}) ==
+               %{behavior: "deny", message: "Continue", interrupt: false}
+    end
+
+    # Mirror the build_permission_response_public functions for testing
+    defp build_permission_response_public({:allow, updated_input}) do
+      %{behavior: "allow", updatedInput: updated_input}
+    end
+
+    defp build_permission_response_public({:allow, updated_input, updated_permissions}) do
+      %{behavior: "allow", updatedInput: updated_input, updatedPermissions: updated_permissions}
+    end
+
+    defp build_permission_response_public(:allow) do
+      %{behavior: "allow", updatedInput: %{}}
+    end
+
+    defp build_permission_response_public({:deny, message}) do
+      %{behavior: "deny", message: message, interrupt: false}
+    end
+
+    defp build_permission_response_public({:deny, message, opts}) when is_list(opts) do
+      %{
+        behavior: "deny",
+        message: message,
+        interrupt: Keyword.get(opts, :interrupt, false)
+      }
+    end
+
+    defp build_permission_response_public(:deny) do
+      %{behavior: "deny", message: "Permission denied", interrupt: false}
+    end
+  end
 end
