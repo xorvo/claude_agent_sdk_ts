@@ -1,6 +1,6 @@
 # ClaudeAgentSdkTs
 
-An Elixir wrapper around the official TypeScript Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`).
+An Elixir wrapper around the official [TypeScript Claude Agent SDK](https://platform.claude.com/docs/en/agent-sdk/typescript) (`@anthropic-ai/claude-agent-sdk`).
 
 This library provides a native Elixir interface for interacting with Claude, with support for streaming responses and working directory configuration.
 
@@ -11,6 +11,7 @@ This library provides a native Elixir interface for interacting with Claude, wit
 - **Streaming** - Both callback-based and Elixir Stream-based streaming
 - **Working Directory** - Configure `cwd` for file operations
 - **Permission Modes** - Control tool permissions (bypass, accept edits, etc.)
+- **Abort Support** - Cancel in-flight requests at any time
 - **Supervised** - OTP-compliant with supervision trees
 
 ## Requirements
@@ -267,6 +268,42 @@ Set the working directory for file operations:
   max_turns: 3
 )
 ```
+
+### Sessions with Abort Support
+
+Use `Session` for multi-turn conversations with the ability to abort in-flight requests:
+
+```elixir
+alias ClaudeAgentSdkTs.Session
+
+# Start a session
+{:ok, session} = Session.start_link()
+
+# Start a long-running task in another process
+task = Task.async(fn ->
+  Session.chat(session, "Write a very detailed essay about climate change")
+end)
+
+# Abort after a few seconds if needed
+Process.sleep(2000)
+Session.abort(session)
+
+# The task will return {:error, :aborted}
+case Task.await(task) do
+  {:ok, response} -> IO.puts(response)
+  {:error, :aborted} -> IO.puts("Request was aborted")
+end
+
+# Sessions maintain conversation history
+{:ok, _} = Session.chat(session, "My name is Alice")
+{:ok, response} = Session.chat(session, "What's my name?")
+# Claude will remember: "Your name is Alice"
+
+# Clean up
+Session.stop(session)
+```
+
+The `abort/1` function leverages the TypeScript SDK's `AbortController` to properly cancel the underlying HTTP request to the Claude API.
 
 ## Architecture
 

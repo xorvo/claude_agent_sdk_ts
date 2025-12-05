@@ -66,6 +66,68 @@ defmodule ClaudeAgentSdkTs.PortBridge do
   end
 
   @doc """
+  Like `chat/2`, but returns the request reference immediately for abort support.
+
+  Returns `{ref, result_fun}` where:
+    - `ref` is the request reference that can be passed to `abort/1`
+    - `result_fun` is a 0-arity function that blocks until the response is ready
+
+  ## Options
+
+    * `:timeout` - Request timeout in milliseconds (default: 300_000)
+    * `:caller` - Process to receive result messages (default: `self()`).
+      The `wait_fn` must be called from this process.
+
+  ## Example
+
+      {ref, wait} = PortBridge.chat_async("Long task", %{})
+
+      # In another process/later:
+      PortBridge.abort(ref)
+
+      # Get the result (will be {:error, :aborted} if aborted)
+      result = wait.()
+
+  ## Example with explicit caller
+
+      # In a GenServer that spawns a Task:
+      task_pid = spawn(fn ->
+        receive do
+          {:go, ref, wait_fn} ->
+            result = wait_fn.()
+            # handle result
+        end
+      end)
+
+      {ref, wait_fn} = PortBridge.chat_async("Long task", %{caller: task_pid})
+      send(task_pid, {:go, ref, wait_fn})
+  """
+  @spec chat_async(String.t() | %{content: list()}, map()) ::
+          {reference(), (-> {:ok, String.t()} | {:error, term()})}
+  def chat_async(prompt, opts \\ %{}) do
+    timeout = opts[:timeout] || 300_000
+    caller = opts[:caller] || self()
+    ref = make_ref()
+
+    # Remove :caller from opts before passing to GenServer (it's not a bridge option)
+    bridge_opts = Map.drop(opts, [:caller, :timeout])
+
+    GenServer.cast(__MODULE__, {:chat_async, prompt, bridge_opts, caller, ref})
+
+    wait_fn = fn ->
+      receive do
+        {:chat_complete, ^ref, result} -> result
+        {:chat_error, ^ref, error} -> {:error, error}
+        {:chat_aborted, ^ref} -> {:error, :aborted}
+      after
+        timeout -> {:error, :timeout}
+      end
+    end
+
+    {ref, wait_fn}
+  end
+
+  @doc """
   Sends a chat request and streams responses to the given callback or process.
 
   The prompt can be either:
@@ -97,6 +159,57 @@ defmodule ClaudeAgentSdkTs.PortBridge do
     receive_with_activity_timeout(ref, timeout)
   end
 
+  @doc """
+  Like `stream/3`, but returns the request reference immediately for abort support.
+
+  Returns `{ref, result_fun}` where:
+    - `ref` is the request reference that can be passed to `abort/1`
+    - `result_fun` is a 0-arity function that blocks until completion
+
+  ## Options
+
+    * `:timeout` - Activity timeout in milliseconds (default: 300_000)
+    * `:caller` - Process to receive activity/completion messages (default: `self()`).
+      The `wait_fn` must be called from this process.
+
+  ## Example
+
+      {ref, wait} = PortBridge.stream_async("Long task", %{}, fn msg -> IO.inspect(msg) end)
+
+      # In another process/later:
+      PortBridge.abort(ref)
+
+      # Get the result (will be {:error, :aborted} if aborted)
+      result = wait.()
+
+  ## Example with explicit caller
+
+      # In a GenServer that spawns a Task to handle streaming:
+      task_pid = spawn(fn ->
+        receive do
+          {:go, wait_fn} -> wait_fn.()
+        end
+      end)
+
+      {ref, wait_fn} = PortBridge.stream_async("Task", %{caller: task_pid}, callback)
+      send(task_pid, {:go, wait_fn})
+  """
+  @spec stream_async(String.t() | %{content: list()}, map(), pid() | (map() -> any())) ::
+          {reference(), (-> :ok | {:error, term()})}
+  def stream_async(prompt, opts \\ %{}, callback) do
+    timeout = opts[:timeout] || 300_000
+    caller = opts[:caller] || self()
+    ref = make_ref()
+
+    # Remove :caller from opts before passing to GenServer (it's not a bridge option)
+    bridge_opts = Map.drop(opts, [:caller, :timeout])
+
+    GenServer.cast(__MODULE__, {:stream, prompt, bridge_opts, callback, caller, ref})
+
+    wait_fn = fn -> receive_with_activity_timeout(ref, timeout) end
+    {ref, wait_fn}
+  end
+
   # Waits for stream completion with an activity-based timeout.
   # The timeout resets each time activity is received.
   defp receive_with_activity_timeout(ref, timeout) do
@@ -110,6 +223,9 @@ defmodule ClaudeAgentSdkTs.PortBridge do
 
       {:stream_error, ^ref, error} ->
         {:error, error}
+
+      {:stream_aborted, ^ref} ->
+        {:error, :aborted}
     after
       timeout ->
         # No activity for the timeout duration - truly stuck
@@ -123,6 +239,35 @@ defmodule ClaudeAgentSdkTs.PortBridge do
   @spec send_tool_result(String.t(), any()) :: :ok
   def send_tool_result(tool_use_id, result) do
     GenServer.cast(__MODULE__, {:tool_result, tool_use_id, result})
+  end
+
+  @doc """
+  Aborts an in-flight chat or stream request.
+
+  This sends an abort signal to the Node.js bridge, which will cancel the
+  underlying Claude API request using AbortController.
+
+  ## Arguments
+
+    * `request_id` - The request ID (reference) to abort. This is the same
+      reference used internally when starting the request.
+
+  ## Returns
+
+    * `:ok` - The abort command was sent (doesn't guarantee the request was found)
+
+  ## Example
+
+      # Start a streaming request
+      ref = make_ref()
+      PortBridge.stream("Long task", %{}, fn msg -> IO.inspect(msg) end)
+
+      # Later, abort it
+      PortBridge.abort(ref)
+  """
+  @spec abort(reference() | String.t()) :: :ok
+  def abort(request_id) do
+    GenServer.cast(__MODULE__, {:abort, request_id})
   end
 
   @doc """
@@ -259,6 +404,37 @@ defmodule ClaudeAgentSdkTs.PortBridge do
   end
 
   @impl true
+  def handle_cast({:chat_async, prompt, opts, caller, ref}, state) do
+    # Extract permission handler from opts (if provided)
+    {permission_handler, bridge_opts} = extract_permission_handler(opts)
+
+    command =
+      case prompt do
+        %{content: content} when is_list(content) ->
+          %{
+            type: "chat",
+            id: inspect(ref),
+            content: content,
+            options: bridge_opts
+          }
+
+        prompt when is_binary(prompt) ->
+          %{
+            type: "chat",
+            id: inspect(ref),
+            prompt: prompt,
+            options: bridge_opts
+          }
+      end
+
+    send_command(state.port, command)
+    # Store as :chat_async to distinguish from sync chat
+    pending = Map.put(state.pending, inspect(ref), {:chat_async, caller, ref, permission_handler})
+
+    {:noreply, %{state | pending: pending}}
+  end
+
+  @impl true
   def handle_cast({:stream, prompt, opts, callback, caller, ref}, state) do
     # Extract permission handler from opts (if provided)
     {permission_handler, bridge_opts} = extract_permission_handler(opts)
@@ -295,6 +471,24 @@ defmodule ClaudeAgentSdkTs.PortBridge do
       type: "tool_result",
       toolUseId: tool_use_id,
       result: result
+    }
+
+    send_command(state.port, command)
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_cast({:abort, request_id}, state) do
+    # Convert reference to string if needed (to match how we store IDs)
+    id =
+      case request_id do
+        ref when is_reference(ref) -> inspect(ref)
+        str when is_binary(str) -> str
+      end
+
+    command = %{
+      type: "abort",
+      id: id
     }
 
     send_command(state.port, command)
@@ -456,6 +650,10 @@ defmodule ClaudeAgentSdkTs.PortBridge do
         GenServer.reply(from, {:ok, content})
         %{state | pending: pending}
 
+      {{:chat_async, caller, ref, _handler}, pending} ->
+        send(caller, {:chat_complete, ref, {:ok, content}})
+        %{state | pending: pending}
+
       _ ->
         state
     end
@@ -538,9 +736,46 @@ defmodule ClaudeAgentSdkTs.PortBridge do
         GenServer.reply(from, {:error, message})
         %{state | pending: pending}
 
+      {{:chat_async, caller, ref, _handler}, pending} ->
+        send(caller, {:chat_error, ref, message})
+        %{state | pending: pending}
+
       _ ->
         state
     end
+  end
+
+  defp handle_message(%{"id" => id, "type" => "aborted"}, state) do
+    case Map.pop(state.pending, id) do
+      {{:stream, callback, caller, ref, _handler}, pending} when is_function(callback) ->
+        # Notify via callback
+        callback.(%{type: :aborted})
+        # Signal abort to the caller's receive loop
+        send(caller, {:stream_aborted, ref})
+        %{state | pending: pending}
+
+      {{:stream, pid, caller, ref, _handler}, pending} when is_pid(pid) ->
+        send(pid, :claude_aborted)
+        send(caller, {:stream_aborted, ref})
+        %{state | pending: pending}
+
+      {{from, :chat, _, _handler}, pending} ->
+        GenServer.reply(from, {:error, :aborted})
+        %{state | pending: pending}
+
+      {{:chat_async, caller, ref, _handler}, pending} ->
+        send(caller, {:chat_aborted, ref})
+        %{state | pending: pending}
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_message(%{"id" => id, "type" => "abort_ack"}, state) do
+    # Acknowledgment that abort was processed (request may have already completed)
+    Logger.debug("[PortBridge] Abort acknowledged for #{id}")
+    state
   end
 
   defp handle_message(

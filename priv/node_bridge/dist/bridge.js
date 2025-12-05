@@ -15,6 +15,8 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 const DEBUG = process.env.CLAUDE_AGENT_DEBUG === "1";
 // Store pending permission requests waiting for responses from Elixir
 const pendingPermissions = new Map();
+// Store active AbortControllers for each request, allowing abort from Elixir
+const activeAbortControllers = new Map();
 function debug(msg, data) {
     if (DEBUG) {
         const timestamp = new Date().toISOString();
@@ -196,8 +198,13 @@ async function handleChat(command) {
     const { id, prompt, content, options = {} } = command;
     const promptPreview = prompt ? prompt.slice(0, 100) : `[multimodal: ${content?.length || 0} blocks]`;
     debug(`handleChat called`, { id, prompt: promptPreview, options });
+    // Create an AbortController for this request
+    const abortController = new AbortController();
+    activeAbortControllers.set(id, abortController);
     try {
         const sdkOptions = buildOptions(options, id);
+        // Add the AbortController to SDK options
+        sdkOptions.abortController = abortController;
         debug("SDK options built", sdkOptions);
         debug("Calling query()...");
         const promptParam = buildPrompt(command);
@@ -234,12 +241,23 @@ async function handleChat(command) {
         }
     }
     catch (error) {
-        debug("Error in handleChat", { error: String(error) });
-        send({
-            id,
-            type: "error",
-            message: error instanceof Error ? error.message : String(error),
-        });
+        // Check if this was an abort
+        if (abortController.signal.aborted) {
+            debug("Chat aborted", { id });
+            send({ id, type: "aborted", message: "Request was aborted" });
+        }
+        else {
+            debug("Error in handleChat", { error: String(error) });
+            send({
+                id,
+                type: "error",
+                message: error instanceof Error ? error.message : String(error),
+            });
+        }
+    }
+    finally {
+        // Clean up the abort controller
+        activeAbortControllers.delete(id);
     }
 }
 // Handle a streaming chat command
@@ -247,8 +265,13 @@ async function handleStream(command) {
     const { id, prompt, content, options = {} } = command;
     const promptPreview = prompt ? prompt.slice(0, 100) : `[multimodal: ${content?.length || 0} blocks]`;
     debug(`handleStream called`, { id, prompt: promptPreview, options });
+    // Create an AbortController for this request
+    const abortController = new AbortController();
+    activeAbortControllers.set(id, abortController);
     try {
         const sdkOptions = buildOptions(options, id);
+        // Add the AbortController to SDK options
+        sdkOptions.abortController = abortController;
         debug("SDK options built for stream", sdkOptions);
         // Enable partial messages for streaming
         sdkOptions.includePartialMessages = true;
@@ -315,12 +338,42 @@ async function handleStream(command) {
         send({ id, type: "end" });
     }
     catch (error) {
-        debug("Error in handleStream", { error: String(error) });
-        send({
-            id,
-            type: "error",
-            message: error instanceof Error ? error.message : String(error),
-        });
+        // Check if this was an abort
+        if (abortController.signal.aborted) {
+            debug("Stream aborted", { id });
+            send({ id, type: "aborted", message: "Request was aborted" });
+        }
+        else {
+            debug("Error in handleStream", { error: String(error) });
+            send({
+                id,
+                type: "error",
+                message: error instanceof Error ? error.message : String(error),
+            });
+        }
+    }
+    finally {
+        // Clean up the abort controller
+        activeAbortControllers.delete(id);
+    }
+}
+/**
+ * Handle an abort command from Elixir
+ */
+function handleAbort(command) {
+    const { id } = command;
+    debug("handleAbort called", { id });
+    const controller = activeAbortControllers.get(id);
+    if (controller) {
+        debug("Aborting request", { id });
+        controller.abort();
+        // Note: The aborted response will be sent by handleChat/handleStream
+        // when they catch the abort error
+    }
+    else {
+        debug("No active request found to abort", { id });
+        // Send acknowledgment even if no request found (might have already completed)
+        send({ id, type: "abort_ack", found: false });
     }
 }
 // Main entry point
@@ -360,6 +413,10 @@ async function main() {
             case "stream":
                 debug("Dispatching to handleStream");
                 await handleStream(command);
+                break;
+            case "abort":
+                debug("Dispatching to handleAbort");
+                handleAbort(command);
                 break;
             case "permission_response":
                 debug("Handling permission response");

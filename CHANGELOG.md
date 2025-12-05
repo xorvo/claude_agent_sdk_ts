@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2025-12-05
+
+### Added
+
+- **Abort/interrupt support for running sessions** - Cancel in-flight requests at any time
+  - New `Session.abort/1` function to abort the current chat or stream request
+  - Leverages TypeScript SDK's `AbortController` to properly cancel HTTP requests
+  - Aborted requests return `{:error, :aborted}`
+  - New `PortBridge.abort/1` for low-level abort control
+  - New `PortBridge.chat_async/2` and `PortBridge.stream_async/3` for async operations with abort support
+  - Node.js bridge updated to track and abort requests via `AbortController`
+
+### Changed
+
+- `Session.chat/3` and `Session.stream/4` now use async operations internally to support abort
+- Session state now tracks `current_request_ref` for abort functionality
+
+### Fixed
+
+- **Session GenServer crash on PortBridge messages** ([#4](https://github.com/xorvo/claude_agent_sdk_ts/issues/4))
+  - Root cause: `chat_async/2` and `stream_async/3` captured the calling process (`self()`) as the
+    message recipient, but Session called these from the GenServer and spawned separate Tasks to
+    wait for results. PortBridge sent messages to Session, which had no handlers for them.
+  - Fix: Added `:caller` option to `chat_async/2` and `stream_async/3` to specify which process
+    should receive messages. Session now spawns the Task first and passes its PID as the caller.
+  - `Session.stream/4` and `Session.chat/3` no longer crash during async operations
+
 ## [1.2.0] - 2025-12-02
 
 ### Added

@@ -20,6 +20,25 @@ defmodule ClaudeAgentSdkTs.Session do
 
       # Stop the session
       ClaudeAgentSdkTs.Session.stop(session)
+
+  ## Aborting Requests
+
+  You can abort an in-flight `chat/3` or `stream/4` request using `abort/1`:
+
+      # Start a long-running task in another process
+      task = Task.async(fn ->
+        Session.chat(session, "Write a very long story")
+      end)
+
+      # Abort after a few seconds
+      Process.sleep(2000)
+      Session.abort(session)
+
+      # The task will return {:error, :aborted}
+      {:error, :aborted} = Task.await(task)
+
+  Note: `abort/1` sends an abort signal to the underlying Claude API request.
+  If no request is currently in progress, it has no effect.
   """
 
   use GenServer
@@ -30,7 +49,8 @@ defmodule ClaudeAgentSdkTs.Session do
   @type state :: %{
           config: Config.t(),
           history: list(map()),
-          tools: list(Tool.t())
+          tools: list(Tool.t()),
+          current_request_ref: reference() | nil
         }
 
   # Client API
@@ -174,6 +194,34 @@ defmodule ClaudeAgentSdkTs.Session do
     GenServer.stop(session)
   end
 
+  @doc """
+  Aborts the current in-flight request, if any.
+
+  This sends an abort signal to the underlying Claude API request, causing it
+  to be cancelled. The `chat/3` or `stream/4` call that initiated the request
+  will return `{:error, :aborted}`.
+
+  If no request is currently in progress, this function has no effect.
+
+  ## Examples
+
+      # Start a long-running task in another process
+      task = Task.async(fn ->
+        Session.chat(session, "Write a very long story")
+      end)
+
+      # Abort after a few seconds
+      Process.sleep(2000)
+      Session.abort(session)
+
+      # The task will return {:error, :aborted}
+      {:error, :aborted} = Task.await(task)
+  """
+  @spec abort(GenServer.server()) :: :ok
+  def abort(session) do
+    GenServer.cast(session, :abort)
+  end
+
   # Server Callbacks
 
   @impl true
@@ -184,14 +232,15 @@ defmodule ClaudeAgentSdkTs.Session do
     state = %{
       config: config,
       history: [],
-      tools: tools
+      tools: tools,
+      current_request_ref: nil
     }
 
     {:ok, state}
   end
 
   @impl true
-  def handle_call({:chat, message, opts}, _from, state) do
+  def handle_call({:chat, message, opts}, from, state) do
     # Extract permission handler before merging config
     {permission_handler, opts} = Keyword.pop(opts, :can_use_tool)
 
@@ -209,21 +258,30 @@ defmodule ClaudeAgentSdkTs.Session do
     # Add conversation history context to the prompt
     prompt = build_prompt_with_history(message, state.history)
 
-    case ClaudeAgentSdkTs.PortBridge.chat(prompt, bridge_opts) do
-      {:ok, response} ->
-        # Update history with the new exchange
-        history =
-          state.history ++
-            [
-              %{role: "user", content: message},
-              %{role: "assistant", content: response}
-            ]
+    # Spawn a task first to get its PID, then start the async chat with task as caller
+    parent = self()
 
-        {:reply, {:ok, response}, %{state | history: history}}
+    {:ok, task_pid} =
+      Task.start(fn ->
+        # Wait for the wait_fn to be sent to us
+        receive do
+          {:start, wait_fn} ->
+            result = wait_fn.()
+            send(parent, {:chat_result, from, message, result})
+        end
+      end)
 
-      {:error, _} = error ->
-        {:reply, error, state}
-    end
+    # Start chat_async with the task as the caller so messages go to the task
+    {bridge_ref, wait_fn} =
+      ClaudeAgentSdkTs.PortBridge.chat_async(prompt, Map.put(bridge_opts, :caller, task_pid))
+
+    # Send wait_fn to the task to start processing
+    send(task_pid, {:start, wait_fn})
+
+    # Store the bridge ref so abort can find it
+    state = %{state | current_request_ref: bridge_ref}
+
+    {:noreply, state}
   end
 
   @impl true
@@ -244,38 +302,61 @@ defmodule ClaudeAgentSdkTs.Session do
 
     prompt = build_prompt_with_history(message, state.history)
 
-    # Collect chunks to update history after streaming completes
-    chunks = []
+    # Use an Agent to collect chunks across callback invocations
+    {:ok, collector} = Agent.start_link(fn -> [] end)
 
     wrapped_callback = fn
       %{type: :chunk, content: content} = msg ->
         callback.(msg)
-        {:collect, content}
+        Agent.update(collector, fn chunks -> [content | chunks] end)
 
       %{type: :end} = msg ->
         callback.(msg)
-        :done
+
+      %{type: :aborted} = msg ->
+        callback.(msg)
 
       other ->
         callback.(other)
-        :ok
     end
 
-    # Spawn a task to handle streaming
+    # Spawn a task first to get its PID, then start the async stream with task as caller
     parent = self()
 
-    Task.start(fn ->
-      result =
-        stream_and_collect(prompt, bridge_opts, wrapped_callback, chunks, fn collected ->
-          # Send collected content back to update history
-          send(parent, {:stream_complete, from, message, collected})
-        end)
+    {:ok, task_pid} =
+      Task.start(fn ->
+        # Wait for the wait_fn to be sent to us
+        receive do
+          {:start, wait_fn} ->
+            result = wait_fn.()
 
-      case result do
-        :ok -> :ok
-        {:error, _} = error -> GenServer.reply(from, error)
-      end
-    end)
+            case result do
+              :ok ->
+                # Get collected chunks and send to parent for history update
+                collected = Agent.get(collector, & &1) |> Enum.reverse()
+                Agent.stop(collector)
+                send(parent, {:stream_complete, from, message, collected})
+
+              {:error, _} = error ->
+                Agent.stop(collector)
+                GenServer.reply(from, error)
+            end
+        end
+      end)
+
+    # Start stream_async with the task as the caller so messages go to the task
+    {bridge_ref, wait_fn} =
+      ClaudeAgentSdkTs.PortBridge.stream_async(
+        prompt,
+        Map.put(bridge_opts, :caller, task_pid),
+        wrapped_callback
+      )
+
+    # Send wait_fn to the task to start processing
+    send(task_pid, {:start, wait_fn})
+
+    # Store the bridge ref so abort can find it
+    state = %{state | current_request_ref: bridge_ref}
 
     {:noreply, state}
   end
@@ -296,7 +377,49 @@ defmodule ClaudeAgentSdkTs.Session do
   end
 
   @impl true
+  def handle_cast(:abort, state) do
+    case state.current_request_ref do
+      nil ->
+        # No active request to abort
+        {:noreply, state}
+
+      ref ->
+        # Send abort to the PortBridge
+        ClaudeAgentSdkTs.PortBridge.abort(ref)
+        # Clear the ref (the result handler will still run and handle the error)
+        {:noreply, %{state | current_request_ref: nil}}
+    end
+  end
+
+  @impl true
+  def handle_info({:chat_result, from, message, result}, state) do
+    # Clear the request ref
+    state = %{state | current_request_ref: nil}
+
+    case result do
+      {:ok, response} ->
+        # Update history with the new exchange
+        history =
+          state.history ++
+            [
+              %{role: "user", content: message},
+              %{role: "assistant", content: response}
+            ]
+
+        GenServer.reply(from, {:ok, response})
+        {:noreply, %{state | history: history}}
+
+      {:error, _} = error ->
+        GenServer.reply(from, error)
+        {:noreply, state}
+    end
+  end
+
+  @impl true
   def handle_info({:stream_complete, from, message, collected}, state) do
+    # Clear the request ref
+    state = %{state | current_request_ref: nil}
+
     response = Enum.join(collected)
 
     history =
@@ -393,35 +516,4 @@ defmodule ClaudeAgentSdkTs.Session do
   end
 
   defp extract_text_content(_), do: "[non-text content]"
-
-  defp stream_and_collect(prompt, bridge_opts, callback, chunks, on_complete) do
-    collected = Agent.start_link(fn -> [] end)
-
-    result =
-      ClaudeAgentSdkTs.PortBridge.stream(prompt, bridge_opts, fn msg ->
-        case callback.(msg) do
-          {:collect, content} ->
-            case collected do
-              {:ok, agent} -> Agent.update(agent, fn c -> c ++ [content] end)
-              _ -> :ok
-            end
-
-          :done ->
-            case collected do
-              {:ok, agent} ->
-                final = Agent.get(agent, & &1)
-                Agent.stop(agent)
-                on_complete.(final)
-
-              _ ->
-                on_complete.(chunks)
-            end
-
-          _ ->
-            :ok
-        end
-      end)
-
-    result
-  end
 end
