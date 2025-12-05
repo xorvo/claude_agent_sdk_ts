@@ -35,9 +35,38 @@ defmodule ClaudeAgentSdkTs.Config do
     * `:plan` - Planning mode, no tool execution
     * `:dont_ask` - Don't ask for permissions, deny if not pre-approved
 
+  ## MCP Servers
+
+  The `:mcp_servers` option allows you to connect MCP (Model Context Protocol) servers
+  that provide additional tools to Claude:
+
+      mcp_servers: %{
+        "my_server" => %{
+          type: "stdio",
+          command: "python3",
+          args: ["my_tool_server.py"]
+        },
+        "http_server" => %{
+          type: "http",
+          url: "http://localhost:8080/mcp"
+        }
+      }
+
+  Supported server types:
+    * `"stdio"` - Server communicates via stdin/stdout (requires `command` and optionally `args`)
+    * `"sse"` - Server-Sent Events (requires `url`)
+    * `"http"` - HTTP transport (requires `url`)
+
   """
 
   @type permission_mode :: :default | :accept_edits | :bypass_permissions | :plan | :dont_ask
+
+  @type mcp_server_config :: %{
+          type: String.t(),
+          command: String.t() | nil,
+          args: list(String.t()) | nil,
+          url: String.t() | nil
+        }
 
   @type t :: %__MODULE__{
           model: String.t() | nil,
@@ -48,7 +77,8 @@ defmodule ClaudeAgentSdkTs.Config do
           allowed_tools: list(String.t()) | nil,
           disallowed_tools: list(String.t()) | nil,
           permission_mode: permission_mode() | nil,
-          cwd: String.t() | nil
+          cwd: String.t() | nil,
+          mcp_servers: %{String.t() => mcp_server_config()} | nil
         }
 
   defstruct [
@@ -60,7 +90,8 @@ defmodule ClaudeAgentSdkTs.Config do
     :allowed_tools,
     :disallowed_tools,
     :permission_mode,
-    :cwd
+    :cwd,
+    :mcp_servers
   ]
 
   @defaults %{
@@ -72,7 +103,8 @@ defmodule ClaudeAgentSdkTs.Config do
     allowed_tools: nil,
     disallowed_tools: nil,
     permission_mode: :bypass_permissions,
-    cwd: nil
+    cwd: nil,
+    mcp_servers: nil
   }
 
   @doc """
@@ -108,7 +140,26 @@ defmodule ClaudeAgentSdkTs.Config do
   defp convert_value(:permission_mode, :bypass_permissions), do: "bypassPermissions"
   defp convert_value(:permission_mode, :plan), do: "plan"
   defp convert_value(:permission_mode, :dont_ask), do: "dontAsk"
+
+  # Convert mcp_servers map - ensure nested keys are strings for JSON encoding
+  defp convert_value(:mcp_servers, servers) when is_map(servers) do
+    servers
+    |> Enum.map(fn {server_name, config} ->
+      converted_config =
+        config
+        |> Enum.map(fn {k, v} -> {to_string_key(k), v} end)
+        |> Map.new()
+
+      {server_name, converted_config}
+    end)
+    |> Map.new()
+  end
+
   defp convert_value(_key, value), do: value
+
+  # Convert atom keys to strings for JSON encoding
+  defp to_string_key(key) when is_atom(key), do: Atom.to_string(key)
+  defp to_string_key(key) when is_binary(key), do: key
 
   defp to_camel_case(atom) do
     atom

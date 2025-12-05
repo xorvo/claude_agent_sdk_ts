@@ -68,6 +68,7 @@ Or pass options directly to function calls.
 | `disallowed_tools` | list | List of disallowed tool names |
 | `permission_mode` | atom | Permission mode (see below) |
 | `can_use_tool` | function | Interactive permission handler (see below) |
+| `mcp_servers` | map | MCP servers configuration (see below) |
 
 ### Permission Modes
 
@@ -76,6 +77,49 @@ Or pass options directly to function calls.
 - `:bypass_permissions` - Skip all permission prompts (default)
 - `:plan` - Planning mode, no tool execution
 - `:dont_ask` - Don't ask for permissions, deny if not pre-approved
+
+### MCP Servers
+
+Connect MCP (Model Context Protocol) servers to provide additional tools to Claude:
+
+```elixir
+# stdio server (runs a command)
+{:ok, response} = ClaudeAgentSdkTs.chat(
+  "Use the weather tool to check the forecast",
+  mcp_servers: %{
+    "weather" => %{
+      type: "stdio",
+      command: "python3",
+      args: ["weather_server.py"]
+    }
+  }
+)
+
+# HTTP server
+{:ok, response} = ClaudeAgentSdkTs.chat(
+  "Query the database",
+  mcp_servers: %{
+    "db" => %{
+      type: "http",
+      url: "http://localhost:8080/mcp"
+    }
+  }
+)
+
+# Multiple servers
+{:ok, response} = ClaudeAgentSdkTs.chat(
+  "Check weather and query database",
+  mcp_servers: %{
+    "weather" => %{type: "stdio", command: "weather_server"},
+    "db" => %{type: "http", url: "http://localhost:8080/mcp"}
+  }
+)
+```
+
+Supported server types:
+- `"stdio"` - Server communicates via stdin/stdout (requires `command`, optionally `args`)
+- `"sse"` - Server-Sent Events (requires `url`)
+- `"http"` - HTTP transport (requires `url`)
 
 ### Interactive Permission Handling (can_use_tool)
 

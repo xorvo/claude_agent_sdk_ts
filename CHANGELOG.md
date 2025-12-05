@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2025-12-05
+
+### Added
+
+- **MCP (Model Context Protocol) server support** - Connect external tool servers to Claude
+  - New `:mcp_servers` option for `chat/2`, `stream/3`, `Session.chat/3`, and `Session.stream/4`
+  - Supports stdio, SSE, and HTTP server types
+  - Pass custom tool servers that Claude can use during conversations
+
 ## [1.3.0] - 2025-12-05
 
 ### Added

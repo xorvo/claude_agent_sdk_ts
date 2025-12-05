@@ -176,6 +176,8 @@ function buildOptions(opts = {}, commandId = null) {
         sdkOptions.permissionMode = opts.permissionMode;
     if (opts.systemPrompt)
         sdkOptions.systemPrompt = opts.systemPrompt;
+    if (opts.mcpServers)
+        sdkOptions.mcpServers = opts.mcpServers;
     // If interactive permissions are enabled, set up the canUseTool callback
     if (opts.interactivePermissions && commandId) {
         debug("Enabling interactive permissions for command", { commandId });
