@@ -1,7 +1,7 @@
 defmodule ClaudeAgentSdkTs.MixProject do
   use Mix.Project
 
-  @version "1.4.0"
+  @version "1.5.0-rc.1"
   @source_url "https://github.com/xorvo/claude_agent_sdk_ts"
 
   def project do

@@ -9,7 +9,11 @@ defmodule ClaudeAgentSdkTs.Config do
         max_turns: 10,
         max_budget_usd: 1.0,
         timeout: 300_000,
-        permission_mode: :bypass_permissions
+        permission_mode: :bypass_permissions,
+        # Authentication
+        use_bedrock: true,
+        aws_profile: "my-profile",
+        aws_region: "us-east-1"
 
   Or passed as options to individual function calls, which override the global config.
 
@@ -24,6 +28,13 @@ defmodule ClaudeAgentSdkTs.Config do
     * `:disallowed_tools` - List of tool names Claude is not allowed to use
     * `:permission_mode` - How Claude handles tool permissions (see below)
     * `:cwd` - Working directory for file operations
+
+  ## Authentication Options
+
+    * `:use_bedrock` - Use AWS Bedrock for authentication (default: false)
+    * `:aws_profile` - AWS profile name from ~/.aws/credentials
+    * `:aws_region` - AWS region (e.g., "us-east-1")
+    * `:api_key` - Anthropic API key (alternative to Bedrock/OAuth)
 
   ## Permission Modes
 
@@ -78,7 +89,11 @@ defmodule ClaudeAgentSdkTs.Config do
           disallowed_tools: list(String.t()) | nil,
           permission_mode: permission_mode() | nil,
           cwd: String.t() | nil,
-          mcp_servers: %{String.t() => mcp_server_config()} | nil
+          mcp_servers: %{String.t() => mcp_server_config()} | nil,
+          use_bedrock: boolean() | nil,
+          aws_profile: String.t() | nil,
+          aws_region: String.t() | nil,
+          api_key: String.t() | nil
         }
 
   defstruct [
@@ -91,7 +106,11 @@ defmodule ClaudeAgentSdkTs.Config do
     :disallowed_tools,
     :permission_mode,
     :cwd,
-    :mcp_servers
+    :mcp_servers,
+    :use_bedrock,
+    :aws_profile,
+    :aws_region,
+    :api_key
   ]
 
   @defaults %{
@@ -104,7 +123,11 @@ defmodule ClaudeAgentSdkTs.Config do
     disallowed_tools: nil,
     permission_mode: :bypass_permissions,
     cwd: nil,
-    mcp_servers: nil
+    mcp_servers: nil,
+    use_bedrock: nil,
+    aws_profile: nil,
+    aws_region: nil,
+    api_key: nil
   }
 
   @doc """

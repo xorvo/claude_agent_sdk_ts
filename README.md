@@ -9,6 +9,7 @@ This library provides a native Elixir interface for interacting with Claude, wit
 - **Native Elixir API** - Idiomatic Elixir functions and patterns
 - **AWS Bedrock Support** - Automatic credential detection from `~/.aws` config
 - **Streaming** - Both callback-based and Elixir Stream-based streaming
+- **Slash Commands** - Query available slash commands from the SDK
 - **Working Directory** - Configure `cwd` for file operations
 - **Permission Modes** - Control tool permissions (bypass, accept edits, etc.)
 - **Abort Support** - Cancel in-flight requests at any time
@@ -69,6 +70,10 @@ Or pass options directly to function calls.
 | `permission_mode` | atom | Permission mode (see below) |
 | `can_use_tool` | function | Interactive permission handler (see below) |
 | `mcp_servers` | map | MCP servers configuration (see below) |
+| `use_bedrock` | boolean | Use AWS Bedrock for authentication |
+| `aws_profile` | string | AWS profile name |
+| `aws_region` | string | AWS region (e.g., "us-east-1") |
+| `api_key` | string | Anthropic API key |
 
 ### Permission Modes
 
@@ -261,6 +266,32 @@ handler = fn tool_name, tool_input, _opts ->
 end
 ```
 
+### Slash Commands
+
+Query available slash commands from the Claude Agent SDK:
+
+```elixir
+# Get all available commands
+{:ok, commands} = ClaudeAgentSdkTs.supported_commands()
+
+# Each command has name, description, and argument_hint
+Enum.each(commands, fn cmd ->
+  IO.puts("#{cmd.name} - #{cmd.description}")
+end)
+
+# Example output:
+# /help - Get help with using Claude Code
+# /model - Select AI model
+# /clear - Clear conversation history
+# ...
+
+# Find a specific command
+help_cmd = Enum.find(commands, & &1.name == "/help")
+
+# Bang version that raises on error
+commands = ClaudeAgentSdkTs.supported_commands!()
+```
+
 ## Quick Start
 
 ### Simple Chat
@@ -369,20 +400,58 @@ The `abort/1` function leverages the TypeScript SDK's `AbortController` to prope
 └─────────────────────────────────────────────────────────┘
 ```
 
-## AWS Credentials
+## Authentication
 
-The library automatically detects AWS credentials from standard locations:
+The SDK supports multiple authentication methods. You can configure authentication via **Elixir config** (recommended) or **environment variables**.
 
-1. **AWS config files** (`~/.aws/credentials` and `~/.aws/config`) - recommended
-2. **Environment variables**:
-   ```bash
-   export AWS_ACCESS_KEY_ID=your_key
-   export AWS_SECRET_ACCESS_KEY=your_secret
-   export AWS_REGION=us-east-1
-   ```
+### Option 1: AWS Bedrock (Recommended)
+
+Configure in your `config/config.exs`:
+
+```elixir
+config :claude_agent_sdk_ts,
+  use_bedrock: true,
+  aws_profile: "your-aws-profile",
+  aws_region: "us-east-1"
+```
+
+Or via environment variables:
+
+```bash
+export CLAUDE_CODE_USE_BEDROCK=1
+export AWS_PROFILE=your-aws-profile
+export AWS_REGION=us-east-1
+```
+
+AWS credentials are detected from standard locations:
+1. **AWS config files** (`~/.aws/credentials` and `~/.aws/config`)
+2. **Environment variables** (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
 3. **IAM roles** (EC2, ECS, Lambda)
 
-No additional configuration is needed if your AWS CLI is already configured.
+### Option 2: API Key
+
+Configure in your `config/config.exs`:
+
+```elixir
+config :claude_agent_sdk_ts,
+  api_key: "sk-ant-..."
+```
+
+Or via environment variable:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+### Option 3: OAuth (Claude Code CLI)
+
+Without Bedrock or API key config, the SDK uses OAuth tokens from Claude Code CLI.
+
+1. Install Claude Code CLI: `npm install -g @anthropic-ai/claude-code`
+2. Authenticate: `claude /login`
+3. Tokens are stored in `~/.claude/.credentials.json`
+
+**Note:** OAuth tokens expire periodically. If you get a `401 authentication_error`, run `claude /login` to refresh.
 
 ## Development
 

@@ -242,6 +242,30 @@ defmodule ClaudeAgentSdkTs.PortBridge do
   end
 
   @doc """
+  Retrieves the list of available slash commands from the Claude Agent SDK.
+
+  Returns a list of slash commands, each with:
+    * `name` - The command name (e.g., "/help")
+    * `description` - A description of what the command does
+    * `argument_hint` - A hint about expected arguments
+
+  ## Options
+
+    * `:timeout` - Request timeout in milliseconds (default: 30_000)
+
+  ## Example
+
+      {:ok, commands} = PortBridge.get_commands()
+      Enum.each(commands, fn cmd ->
+        IO.puts("\#{cmd.name} - \#{cmd.description}")
+      end)
+  """
+  @spec get_commands(map()) :: {:ok, list(map())} | {:error, term()}
+  def get_commands(opts \\ %{}) do
+    GenServer.call(__MODULE__, {:get_commands, opts}, opts[:timeout] || 30_000)
+  end
+
+  @doc """
   Aborts an in-flight chat or stream request.
 
   This sends an abort signal to the Node.js bridge, which will cancel the
@@ -399,6 +423,22 @@ defmodule ClaudeAgentSdkTs.PortBridge do
 
     send_command(state.port, command)
     pending = Map.put(state.pending, inspect(ref), {from, :chat, [], permission_handler})
+
+    {:noreply, %{state | pending: pending}}
+  end
+
+  @impl true
+  def handle_call({:get_commands, opts}, from, state) do
+    ref = make_ref()
+
+    command = %{
+      type: "get_commands",
+      id: inspect(ref),
+      options: opts
+    }
+
+    send_command(state.port, command)
+    pending = Map.put(state.pending, inspect(ref), {from, :get_commands})
 
     {:noreply, %{state | pending: pending}}
   end
@@ -587,10 +627,11 @@ defmodule ClaudeAgentSdkTs.PortBridge do
 
     Logger.debug("[PortBridge] Starting Node.js bridge at #{bridge_path}")
 
-    # Build environment: inherit all parent env vars and add debug flag
+    # Build environment: inherit all parent env vars, add debug flag, and auth config
     env =
       System.get_env()
       |> Map.merge(%{"CLAUDE_AGENT_DEBUG" => "1"})
+      |> Map.merge(build_auth_env())
       |> Enum.map(fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)
 
     port =
@@ -605,6 +646,43 @@ defmodule ClaudeAgentSdkTs.PortBridge do
 
     Logger.debug("[PortBridge] Node.js bridge started, port: #{inspect(port)}")
     port
+  end
+
+  # Build environment variables for authentication from application config
+  defp build_auth_env do
+    app_config = Application.get_all_env(:claude_agent_sdk_ts)
+
+    env = %{}
+
+    env =
+      if app_config[:use_bedrock] do
+        Map.put(env, "CLAUDE_CODE_USE_BEDROCK", "1")
+      else
+        env
+      end
+
+    env =
+      if profile = app_config[:aws_profile] do
+        Map.put(env, "AWS_PROFILE", profile)
+      else
+        env
+      end
+
+    env =
+      if region = app_config[:aws_region] do
+        Map.put(env, "AWS_REGION", region)
+      else
+        env
+      end
+
+    env =
+      if api_key = app_config[:api_key] do
+        Map.put(env, "ANTHROPIC_API_KEY", api_key)
+      else
+        env
+      end
+
+    env
   end
 
   defp send_command(port, command) do
@@ -652,6 +730,27 @@ defmodule ClaudeAgentSdkTs.PortBridge do
 
       {{:chat_async, caller, ref, _handler}, pending} ->
         send(caller, {:chat_complete, ref, {:ok, content}})
+        %{state | pending: pending}
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_message(%{"id" => id, "type" => "commands", "commands" => commands}, state) do
+    case Map.pop(state.pending, id) do
+      {{from, :get_commands}, pending} ->
+        # Convert camelCase keys to snake_case for Elixir conventions
+        normalized_commands =
+          Enum.map(commands, fn cmd ->
+            %{
+              name: cmd["name"],
+              description: cmd["description"],
+              argument_hint: cmd["argumentHint"]
+            }
+          end)
+
+        GenServer.reply(from, {:ok, normalized_commands})
         %{state | pending: pending}
 
       _ ->
@@ -738,6 +837,10 @@ defmodule ClaudeAgentSdkTs.PortBridge do
 
       {{:chat_async, caller, ref, _handler}, pending} ->
         send(caller, {:chat_error, ref, message})
+        %{state | pending: pending}
+
+      {{from, :get_commands}, pending} ->
+        GenServer.reply(from, {:error, message})
         %{state | pending: pending}
 
       _ ->

@@ -4,7 +4,7 @@
 
 IO.puts("=== Streaming Example: Count to 5 ===\n")
 
-ClaudeAgent.stream("Count to 5", [max_turns: 1], fn
+ClaudeAgentSdkTs.stream("Count to 5", [max_turns: 1], fn
   %{type: :chunk, content: text} ->
     IO.write(text)
 

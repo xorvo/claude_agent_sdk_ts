@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0-rc.1] - 2025-12-05
+
+### Added
+
+- **Slash commands support** - Query available slash commands from the Claude Agent SDK
+  - New `supported_commands/1` and `supported_commands!/1` functions
+  - Returns a list of commands with `name`, `description`, and `argument_hint`
+  - New `PortBridge.get_commands/1` for low-level access
+  - Node.js bridge updated to call SDK's `supportedCommands()` method
+
+### Changed
+
+- **Authentication via Elixir config** - Configure authentication in `config.exs` instead of environment variables:
+  - New `:use_bedrock` option - Set to `true` to use AWS Bedrock
+  - New `:aws_profile` option - AWS profile name from `~/.aws/credentials`
+  - New `:aws_region` option - AWS region (e.g., "us-east-1")
+  - New `:api_key` option - Anthropic API key
+  - Environment variables still work as fallback
+- **Improved authentication documentation** - Clarified three authentication methods with config examples
+
+### Fixed
+
+- **Updated example scripts** - Fixed `ClaudeAgent` → `ClaudeAgentSdkTs` module name in examples
+
 ## [1.4.0] - 2025-12-05
 
 ### Added

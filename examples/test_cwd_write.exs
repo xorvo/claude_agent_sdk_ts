@@ -10,7 +10,7 @@ File.mkdir_p!(tmp_dir)
 
 IO.puts("Setting cwd to: #{tmp_dir}\n")
 
-result = ClaudeAgent.chat(
+result = ClaudeAgentSdkTs.chat(
   "Create a file called hello.txt in the current directory with the content 'Hello from Claude!'. Then create another file called test.json with a simple JSON object containing your name. Finally, list the files you created.",
   cwd: tmp_dir,
   max_turns: 5

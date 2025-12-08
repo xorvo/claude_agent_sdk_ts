@@ -378,6 +378,35 @@ function handleAbort(command) {
         send({ id, type: "abort_ack", found: false });
     }
 }
+/**
+ * Handle a get_commands request to retrieve available slash commands
+ */
+async function handleGetCommands(command) {
+    const { id, options = {} } = command;
+    debug("handleGetCommands called", { id });
+    try {
+        const sdkOptions = buildOptions(options);
+        debug("SDK options built for get_commands", sdkOptions);
+        // Create a query object with an empty prompt to access supportedCommands
+        const q = query({ prompt: "", options: sdkOptions });
+        // Get supported commands from the SDK
+        const commands = await q.supportedCommands();
+        debug("Received commands", { count: commands?.length || 0 });
+        send({
+            id,
+            type: "commands",
+            commands: commands || []
+        });
+    }
+    catch (error) {
+        debug("Error in handleGetCommands", { error: String(error) });
+        send({
+            id,
+            type: "error",
+            message: error instanceof Error ? error.message : String(error)
+        });
+    }
+}
 // Main entry point
 async function main() {
     debug("Bridge starting...");
@@ -419,6 +448,10 @@ async function main() {
             case "abort":
                 debug("Dispatching to handleAbort");
                 handleAbort(command);
+                break;
+            case "get_commands":
+                debug("Dispatching to handleGetCommands");
+                await handleGetCommands(command);
                 break;
             case "permission_response":
                 debug("Handling permission response");

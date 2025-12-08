@@ -8,7 +8,7 @@ IO.puts("=== Testing cwd option ===\n")
 project_root = File.cwd!()
 IO.puts("Setting cwd to: #{project_root}\n")
 
-result = ClaudeAgent.chat(
+result = ClaudeAgentSdkTs.chat(
   "List the files in the current directory. Just give me a simple list, nothing else.",
   cwd: project_root,
   max_turns: 3

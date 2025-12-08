@@ -527,6 +527,63 @@ defmodule ClaudeAgentSdkTs do
     ClaudeAgentSdkTs.Session.start_link(opts)
   end
 
+  @type slash_command :: %{
+          name: String.t(),
+          description: String.t(),
+          argument_hint: String.t()
+        }
+
+  @doc """
+  Retrieves the list of available slash commands from the Claude Agent SDK.
+
+  Slash commands are special commands that can be sent as prompts to interact
+  with Claude Code features (e.g., `/help`, `/model`, `/clear`).
+
+  ## Return Value
+
+  Returns a list of slash command maps, each containing:
+    * `:name` - The command name (e.g., "/help")
+    * `:description` - A description of what the command does
+    * `:argument_hint` - A hint about expected arguments
+
+  ## Options
+
+    * `:timeout` - Request timeout in milliseconds (default: 30_000)
+
+  ## Examples
+
+      # Get all available commands
+      {:ok, commands} = ClaudeAgentSdkTs.supported_commands()
+
+      # Display commands
+      Enum.each(commands, fn cmd ->
+        IO.puts("\#{cmd.name} - \#{cmd.description}")
+      end)
+
+      # Find a specific command
+      help_cmd = Enum.find(commands, & &1.name == "/help")
+
+      # With custom timeout
+      {:ok, commands} = ClaudeAgentSdkTs.supported_commands(timeout: 60_000)
+  """
+  @spec supported_commands(keyword()) :: {:ok, [slash_command()]} | {:error, term()}
+  def supported_commands(opts \\ []) do
+    config = Config.new(opts)
+    bridge_opts = Config.to_bridge_opts(config)
+    PortBridge.get_commands(bridge_opts)
+  end
+
+  @doc """
+  Same as `supported_commands/1` but raises on error.
+  """
+  @spec supported_commands!(keyword()) :: [slash_command()]
+  def supported_commands!(opts \\ []) do
+    case supported_commands(opts) do
+      {:ok, commands} -> commands
+      {:error, reason} -> raise "ClaudeAgentSdkTs.supported_commands failed: #{inspect(reason)}"
+    end
+  end
+
   @doc """
   Responds to a pending permission request.
 
