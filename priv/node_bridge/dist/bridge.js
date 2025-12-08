@@ -178,6 +178,15 @@ function buildOptions(opts = {}, commandId = null) {
         sdkOptions.systemPrompt = opts.systemPrompt;
     if (opts.mcpServers)
         sdkOptions.mcpServers = opts.mcpServers;
+    // Session management options
+    if (opts.resume)
+        sdkOptions.resume = opts.resume;
+    if (opts.continue !== undefined)
+        sdkOptions.continue = opts.continue;
+    if (opts.forkSession !== undefined)
+        sdkOptions.forkSession = opts.forkSession;
+    if (opts.resumeSessionAt)
+        sdkOptions.resumeSessionAt = opts.resumeSessionAt;
     // If interactive permissions are enabled, set up the canUseTool callback
     if (opts.interactivePermissions && commandId) {
         debug("Enabling interactive permissions for command", { commandId });
@@ -234,12 +243,14 @@ async function handleChat(command) {
             }
         }
         debug(`Iteration complete, ${messageCount} messages received`);
+        // Extract session_id from result message if available
+        const sessionId = resultMessage?.session_id || null;
         // If we have a result message with a result string, use that
         if (resultMessage && resultMessage.type === "result" && "result" in resultMessage) {
-            send({ id, type: "complete", content: resultMessage.result || fullContent });
+            send({ id, type: "complete", content: resultMessage.result || fullContent, sessionId });
         }
         else {
-            send({ id, type: "complete", content: fullContent });
+            send({ id, type: "complete", content: fullContent, sessionId });
         }
     }
     catch (error) {
@@ -285,6 +296,7 @@ async function handleStream(command) {
         let sentTextLength = 0;
         let lastToolUseId = null;
         let messageCount = 0;
+        let sessionId = null;
         for await (const message of response) {
             messageCount++;
             debug(`Stream message #${messageCount}`, { type: message.type });
@@ -330,6 +342,8 @@ async function handleStream(command) {
                     break;
                 }
                 case "result": {
+                    // Capture session_id from result message for the end response
+                    sessionId = message.session_id || null;
                     // Don't send result content - it's already been streamed via assistant messages
                     // The result message contains the same text that was already sent
                     break;
@@ -337,7 +351,7 @@ async function handleStream(command) {
             }
         }
         debug(`Stream iteration complete, ${messageCount} messages received`);
-        send({ id, type: "end" });
+        send({ id, type: "end", sessionId });
     }
     catch (error) {
         // Check if this was an abort

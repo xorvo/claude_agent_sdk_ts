@@ -367,7 +367,8 @@ defmodule ClaudeAgentSdkTs do
         can_use_tool: handler
       )
   """
-  @spec chat(String.t() | %{content: list()}, chat_opts()) :: {:ok, String.t()} | {:error, term()}
+  @spec chat(String.t() | %{content: list()}, chat_opts()) ::
+          {:ok, String.t(), String.t() | nil} | {:error, term()}
   def chat(prompt, opts \\ []) do
     config = Config.new(opts)
     bridge_opts = Config.to_bridge_opts(config)
@@ -391,11 +392,13 @@ defmodule ClaudeAgentSdkTs do
 
   @doc """
   Same as `chat/2` but raises on error.
+
+  Returns `{response, session_id}` where `session_id` can be used to resume the conversation.
   """
-  @spec chat!(String.t() | %{content: list()}, chat_opts()) :: String.t()
+  @spec chat!(String.t() | %{content: list()}, chat_opts()) :: {String.t(), String.t() | nil}
   def chat!(prompt, opts \\ []) do
     case chat(prompt, opts) do
-      {:ok, response} -> response
+      {:ok, response, session_id} -> {response, session_id}
       {:error, reason} -> raise "ClaudeAgentSdkTs.chat failed: #{inspect(reason)}"
     end
   end
@@ -411,7 +414,14 @@ defmodule ClaudeAgentSdkTs do
 
     * `%{type: :chunk, content: "text"}` - A chunk of the response
     * `%{type: :tool_use, ...}` - Claude wants to use a tool
-    * `%{type: :end}` - Stream has ended
+    * `%{type: :end, session_id: "..."}` - Stream has ended (includes session_id for resumption)
+
+  Returns `{:ok, session_id}` on success, where `session_id` can be used to resume
+  the conversation later.
+
+  **Note:** The `session_id` is only available when the turn completes - either via
+  the `:end` callback event or the function's return value. This is a limitation of
+  the underlying SDK which only provides the session_id in the result message.
 
   ## Options
 
@@ -420,12 +430,15 @@ defmodule ClaudeAgentSdkTs do
 
   ## Examples
 
-      # Text prompt
-      ClaudeAgentSdkTs.stream("Write a poem", fn
+      # Text prompt - session_id available at the end
+      {:ok, session_id} = ClaudeAgentSdkTs.stream("Write a poem", fn
         %{type: :chunk, content: text} -> IO.write(text)
-        %{type: :end} -> IO.puts("")
+        %{type: :end, session_id: sid} -> IO.puts("\\nSession: \#{sid}")
         _ -> :ok
       end)
+
+      # Resume the conversation later
+      {:ok, _} = ClaudeAgentSdkTs.stream("Continue the poem", [resume: session_id], &IO.inspect/1)
 
       # Multimodal
       alias ClaudeAgentSdkTs.Content
@@ -439,7 +452,8 @@ defmodule ClaudeAgentSdkTs do
       end
       ClaudeAgentSdkTs.stream("List files", [can_use_tool: handler], &IO.inspect/1)
   """
-  @spec stream(String.t() | %{content: list()}, chat_opts(), stream_callback()) :: :ok | {:error, term()}
+  @spec stream(String.t() | %{content: list()}, chat_opts(), stream_callback()) ::
+          {:ok, String.t() | nil} | {:error, term()}
   def stream(prompt, opts \\ [], callback) when is_function(callback, 1) do
     config = Config.new(opts)
     bridge_opts = Config.to_bridge_opts(config)

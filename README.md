@@ -9,6 +9,7 @@ This library provides a native Elixir interface for interacting with Claude, wit
 - **Native Elixir API** - Idiomatic Elixir functions and patterns
 - **AWS Bedrock Support** - Automatic credential detection from `~/.aws` config
 - **Streaming** - Both callback-based and Elixir Stream-based streaming
+- **Session Management** - Resume, continue, or fork conversations via SDK session IDs
 - **Slash Commands** - Query available slash commands from the SDK
 - **Working Directory** - Configure `cwd` for file operations
 - **Permission Modes** - Control tool permissions (bypass, accept edits, etc.)
@@ -74,6 +75,10 @@ Or pass options directly to function calls.
 | `aws_profile` | string | AWS profile name |
 | `aws_region` | string | AWS region (e.g., "us-east-1") |
 | `api_key` | string | Anthropic API key |
+| `resume` | string | Session ID to resume a previous conversation |
+| `continue` | boolean | Continue the last session in the CWD |
+| `fork_session` | boolean | Fork from an existing session |
+| `resume_session_at` | string | Resume at a specific point in the session |
 
 ### Permission Modes
 
@@ -297,18 +302,42 @@ commands = ClaudeAgentSdkTs.supported_commands!()
 ### Simple Chat
 
 ```elixir
-# Basic usage
-{:ok, response} = ClaudeAgentSdkTs.chat("What is the capital of France?")
+# Basic usage - returns {response, session_id}
+{:ok, response, session_id} = ClaudeAgentSdkTs.chat("What is the capital of France?")
 IO.puts(response)
 
 # With options
-{:ok, response} = ClaudeAgentSdkTs.chat("Explain quantum computing",
+{:ok, response, session_id} = ClaudeAgentSdkTs.chat("Explain quantum computing",
   model: "claude-sonnet-4-20250514",
   max_turns: 5
 )
 
-# Bang version that raises on error
-response = ClaudeAgentSdkTs.chat!("Hello!")
+# Bang version returns {response, session_id}
+{response, session_id} = ClaudeAgentSdkTs.chat!("Hello!")
+```
+
+### Session Resumption
+
+The SDK now returns a `session_id` that you can use to resume conversations:
+
+```elixir
+# First chat returns a session_id
+{:ok, response1, session_id} = ClaudeAgentSdkTs.chat("My name is Alice")
+IO.puts("Session: #{session_id}")
+
+# Resume that session later - Claude remembers the context!
+{:ok, response2, _} = ClaudeAgentSdkTs.chat("What's my name?", resume: session_id)
+# Claude will respond "Your name is Alice"
+
+# Continue the last session in the current working directory
+{:ok, response, _} = ClaudeAgentSdkTs.chat("Continue our conversation", continue: true)
+
+# Fork a session to branch the conversation
+{:ok, response, new_session_id} = ClaudeAgentSdkTs.chat(
+  "Let's try a different approach",
+  resume: session_id,
+  fork_session: true
+)
 ```
 
 ### Streaming Responses
@@ -316,11 +345,16 @@ response = ClaudeAgentSdkTs.chat!("Hello!")
 #### Callback-based streaming
 
 ```elixir
-ClaudeAgentSdkTs.stream("Count to 5", [max_turns: 1], fn
+# Stream returns {:ok, session_id} on completion
+# Note: session_id is only available when the turn ends (in the :end callback or return value)
+{:ok, session_id} = ClaudeAgentSdkTs.stream("Count to 5", [max_turns: 1], fn
   %{type: :chunk, content: text} -> IO.write(text)
-  %{type: :end} -> IO.puts("\n---Done---")
+  %{type: :end, session_id: sid} -> IO.puts("\n---Done (session: #{sid})---")
   _ -> :ok
 end)
+
+# session_id is also available from the return value
+IO.puts("Can resume with: #{session_id}")
 ```
 
 #### Elixir Stream-based streaming
@@ -369,10 +403,16 @@ case Task.await(task) do
   {:error, :aborted} -> IO.puts("Request was aborted")
 end
 
-# Sessions maintain conversation history
+# Sessions use SDK session management for conversation context
 {:ok, _} = Session.chat(session, "My name is Alice")
 {:ok, response} = Session.chat(session, "What's my name?")
 # Claude will remember: "Your name is Alice"
+
+# Get the current session ID
+session_id = Session.get_session_id(session)
+
+# Reset to start a fresh conversation
+Session.reset(session)
 
 # Clean up
 Session.stop(session)

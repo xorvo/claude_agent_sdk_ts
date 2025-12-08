@@ -116,7 +116,7 @@ defmodule ClaudeAgentSdkTs.PortBridge do
 
     wait_fn = fn ->
       receive do
-        {:chat_complete, ^ref, result} -> result
+        {:chat_complete, ^ref, {:ok, content, session_id}} -> {:ok, content, session_id}
         {:chat_error, ^ref, error} -> {:error, error}
         {:chat_aborted, ^ref} -> {:error, :aborted}
       after
@@ -212,14 +212,15 @@ defmodule ClaudeAgentSdkTs.PortBridge do
 
   # Waits for stream completion with an activity-based timeout.
   # The timeout resets each time activity is received.
+  # Returns {:ok, session_id} on success, {:error, reason} on failure.
   defp receive_with_activity_timeout(ref, timeout) do
     receive do
       {:stream_activity, ^ref} ->
         # Activity received, reset timeout and continue waiting
         receive_with_activity_timeout(ref, timeout)
 
-      {:stream_complete, ^ref, result} ->
-        result
+      {:stream_complete, ^ref, {:ok, session_id}} ->
+        {:ok, session_id}
 
       {:stream_error, ^ref, error} ->
         {:error, error}
@@ -722,14 +723,16 @@ defmodule ClaudeAgentSdkTs.PortBridge do
     end
   end
 
-  defp handle_message(%{"id" => id, "type" => "complete", "content" => content}, state) do
+  defp handle_message(%{"id" => id, "type" => "complete", "content" => content} = msg, state) do
+    session_id = msg["sessionId"]
+
     case Map.pop(state.pending, id) do
       {{from, :chat, _, _handler}, pending} ->
-        GenServer.reply(from, {:ok, content})
+        GenServer.reply(from, {:ok, content, session_id})
         %{state | pending: pending}
 
       {{:chat_async, caller, ref, _handler}, pending} ->
-        send(caller, {:chat_complete, ref, {:ok, content}})
+        send(caller, {:chat_complete, ref, {:ok, content, session_id}})
         %{state | pending: pending}
 
       _ ->
@@ -781,23 +784,25 @@ defmodule ClaudeAgentSdkTs.PortBridge do
     end
   end
 
-  defp handle_message(%{"id" => id, "type" => "end"}, state) do
+  defp handle_message(%{"id" => id, "type" => "end"} = msg, state) do
+    session_id = msg["sessionId"]
+
     case Map.pop(state.pending, id) do
       {{:stream, callback, caller, ref, _handler}, pending} when is_function(callback) ->
-        callback.(%{type: :end})
-        # Signal completion to the caller's receive loop
-        send(caller, {:stream_complete, ref, :ok})
+        callback.(%{type: :end, session_id: session_id})
+        # Signal completion to the caller's receive loop with session_id
+        send(caller, {:stream_complete, ref, {:ok, session_id}})
         %{state | pending: pending}
 
       {{:stream, pid, caller, ref, _handler}, pending} when is_pid(pid) ->
-        send(pid, :claude_end)
-        # Signal completion to the caller's receive loop
-        send(caller, {:stream_complete, ref, :ok})
+        send(pid, {:claude_end, session_id})
+        # Signal completion to the caller's receive loop with session_id
+        send(caller, {:stream_complete, ref, {:ok, session_id}})
         %{state | pending: pending}
 
       {{from, :chat, chunks, _handler}, pending} ->
         content = chunks |> Enum.reverse() |> Enum.join("")
-        GenServer.reply(from, {:ok, content})
+        GenServer.reply(from, {:ok, content, session_id})
         %{state | pending: pending}
 
       _ ->

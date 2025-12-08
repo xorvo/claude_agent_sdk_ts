@@ -2,8 +2,8 @@ defmodule ClaudeAgentSdkTs.Session do
   @moduledoc """
   A GenServer that manages a stateful conversation session with Claude.
 
-  Sessions maintain conversation history, allowing for multi-turn conversations
-  where Claude remembers previous context.
+  Sessions use the SDK's built-in session management, allowing for multi-turn
+  conversations where Claude remembers previous context via session IDs.
 
   ## Usage
 
@@ -12,14 +12,24 @@ defmodule ClaudeAgentSdkTs.Session do
       # First message
       {:ok, response1} = ClaudeAgentSdkTs.Session.chat(session, "My favorite color is blue")
 
-      # Claude will remember the context
+      # Claude will remember the context (via SDK session management)
       {:ok, response2} = ClaudeAgentSdkTs.Session.chat(session, "What's my favorite color?")
 
-      # Reset conversation history
+      # Reset conversation (clears session_id, starts fresh)
       ClaudeAgentSdkTs.Session.reset(session)
 
       # Stop the session
       ClaudeAgentSdkTs.Session.stop(session)
+
+  ## Session Resumption
+
+  The Session module now uses the SDK's native session management. After each
+  interaction, the session_id is stored and automatically passed to subsequent
+  requests using the `:resume` option.
+
+  You can retrieve the current session_id if needed:
+
+      session_id = ClaudeAgentSdkTs.Session.get_session_id(session)
 
   ## Aborting Requests
 
@@ -48,7 +58,7 @@ defmodule ClaudeAgentSdkTs.Session do
 
   @type state :: %{
           config: Config.t(),
-          history: list(map()),
+          session_id: String.t() | nil,
           tools: list(Tool.t()),
           current_request_ref: reference() | nil
         }
@@ -87,7 +97,7 @@ defmodule ClaudeAgentSdkTs.Session do
   @doc """
   Sends a message in the session and waits for the response.
 
-  The conversation history is automatically maintained.
+  The SDK automatically maintains conversation context via session IDs.
 
   The message can be either:
     - A string for simple text prompts
@@ -163,15 +173,17 @@ defmodule ClaudeAgentSdkTs.Session do
   end
 
   @doc """
-  Gets the current conversation history.
+  Gets the current SDK session ID.
+
+  Returns `nil` if no conversation has been started yet.
   """
-  @spec get_history(GenServer.server()) :: list(map())
-  def get_history(session) do
-    GenServer.call(session, :get_history)
+  @spec get_session_id(GenServer.server()) :: String.t() | nil
+  def get_session_id(session) do
+    GenServer.call(session, :get_session_id)
   end
 
   @doc """
-  Resets the conversation history.
+  Resets the session, clearing the session_id to start a fresh conversation.
   """
   @spec reset(GenServer.server()) :: :ok
   def reset(session) do
@@ -231,7 +243,7 @@ defmodule ClaudeAgentSdkTs.Session do
 
     state = %{
       config: config,
-      history: [],
+      session_id: nil,
       tools: tools,
       current_request_ref: nil
     }
@@ -255,8 +267,13 @@ defmodule ClaudeAgentSdkTs.Session do
         bridge_opts
       end
 
-    # Add conversation history context to the prompt
-    prompt = build_prompt_with_history(message, state.history)
+    # Add session_id for resuming the conversation (if we have one)
+    bridge_opts =
+      if state.session_id do
+        Map.put(bridge_opts, "resume", state.session_id)
+      else
+        bridge_opts
+      end
 
     # Spawn a task first to get its PID, then start the async chat with task as caller
     parent = self()
@@ -267,13 +284,13 @@ defmodule ClaudeAgentSdkTs.Session do
         receive do
           {:start, wait_fn} ->
             result = wait_fn.()
-            send(parent, {:chat_result, from, message, result})
+            send(parent, {:chat_result, from, result})
         end
       end)
 
     # Start chat_async with the task as the caller so messages go to the task
     {bridge_ref, wait_fn} =
-      ClaudeAgentSdkTs.PortBridge.chat_async(prompt, Map.put(bridge_opts, :caller, task_pid))
+      ClaudeAgentSdkTs.PortBridge.chat_async(message, Map.put(bridge_opts, :caller, task_pid))
 
     # Send wait_fn to the task to start processing
     send(task_pid, {:start, wait_fn})
@@ -300,25 +317,13 @@ defmodule ClaudeAgentSdkTs.Session do
         bridge_opts
       end
 
-    prompt = build_prompt_with_history(message, state.history)
-
-    # Use an Agent to collect chunks across callback invocations
-    {:ok, collector} = Agent.start_link(fn -> [] end)
-
-    wrapped_callback = fn
-      %{type: :chunk, content: content} = msg ->
-        callback.(msg)
-        Agent.update(collector, fn chunks -> [content | chunks] end)
-
-      %{type: :end} = msg ->
-        callback.(msg)
-
-      %{type: :aborted} = msg ->
-        callback.(msg)
-
-      other ->
-        callback.(other)
-    end
+    # Add session_id for resuming the conversation (if we have one)
+    bridge_opts =
+      if state.session_id do
+        Map.put(bridge_opts, "resume", state.session_id)
+      else
+        bridge_opts
+      end
 
     # Spawn a task first to get its PID, then start the async stream with task as caller
     parent = self()
@@ -331,14 +336,10 @@ defmodule ClaudeAgentSdkTs.Session do
             result = wait_fn.()
 
             case result do
-              :ok ->
-                # Get collected chunks and send to parent for history update
-                collected = Agent.get(collector, & &1) |> Enum.reverse()
-                Agent.stop(collector)
-                send(parent, {:stream_complete, from, message, collected})
+              {:ok, session_id} ->
+                send(parent, {:stream_complete, from, session_id})
 
               {:error, _} = error ->
-                Agent.stop(collector)
                 GenServer.reply(from, error)
             end
         end
@@ -347,9 +348,9 @@ defmodule ClaudeAgentSdkTs.Session do
     # Start stream_async with the task as the caller so messages go to the task
     {bridge_ref, wait_fn} =
       ClaudeAgentSdkTs.PortBridge.stream_async(
-        prompt,
+        message,
         Map.put(bridge_opts, :caller, task_pid),
-        wrapped_callback
+        callback
       )
 
     # Send wait_fn to the task to start processing
@@ -362,13 +363,13 @@ defmodule ClaudeAgentSdkTs.Session do
   end
 
   @impl true
-  def handle_call(:get_history, _from, state) do
-    {:reply, state.history, state}
+  def handle_call(:get_session_id, _from, state) do
+    {:reply, state.session_id, state}
   end
 
   @impl true
   def handle_call(:reset, _from, state) do
-    {:reply, :ok, %{state | history: []}}
+    {:reply, :ok, %{state | session_id: nil}}
   end
 
   @impl true
@@ -392,22 +393,15 @@ defmodule ClaudeAgentSdkTs.Session do
   end
 
   @impl true
-  def handle_info({:chat_result, from, message, result}, state) do
+  def handle_info({:chat_result, from, result}, state) do
     # Clear the request ref
     state = %{state | current_request_ref: nil}
 
     case result do
-      {:ok, response} ->
-        # Update history with the new exchange
-        history =
-          state.history ++
-            [
-              %{role: "user", content: message},
-              %{role: "assistant", content: response}
-            ]
-
+      {:ok, response, session_id} ->
+        # Store the session_id for future requests
         GenServer.reply(from, {:ok, response})
-        {:noreply, %{state | history: history}}
+        {:noreply, %{state | session_id: session_id}}
 
       {:error, _} = error ->
         GenServer.reply(from, error)
@@ -416,21 +410,12 @@ defmodule ClaudeAgentSdkTs.Session do
   end
 
   @impl true
-  def handle_info({:stream_complete, from, message, collected}, state) do
-    # Clear the request ref
-    state = %{state | current_request_ref: nil}
-
-    response = Enum.join(collected)
-
-    history =
-      state.history ++
-        [
-          %{role: "user", content: message},
-          %{role: "assistant", content: response}
-        ]
+  def handle_info({:stream_complete, from, session_id}, state) do
+    # Clear the request ref and store the session_id
+    state = %{state | current_request_ref: nil, session_id: session_id}
 
     GenServer.reply(from, :ok)
-    {:noreply, %{state | history: history}}
+    {:noreply, state}
   end
 
   # Private Functions
@@ -452,68 +437,4 @@ defmodule ClaudeAgentSdkTs.Session do
       tools -> Map.put(bridge_opts, "tools", Enum.map(tools, &Tool.to_definition/1))
     end
   end
-
-  defp build_prompt_with_history(message, []) do
-    message
-  end
-
-  defp build_prompt_with_history(message, history) do
-    context =
-      history
-      |> Enum.map(fn
-        %{role: "user", content: content} -> "Human: #{extract_text_content(content)}"
-        %{role: "assistant", content: content} -> "Assistant: #{content}"
-      end)
-      |> Enum.join("\n\n")
-
-    # For multimodal messages, we need to prepend history context
-    # but keep the multimodal structure intact
-    case message do
-      %{content: content_blocks} when is_list(content_blocks) ->
-        # Prepend history as a text block to the multimodal content
-        history_block = %{
-          type: "text",
-          text: """
-          Previous conversation:
-          #{context}
-
-          Current message:
-          """
-        }
-
-        %{content: [history_block | content_blocks]}
-
-      text when is_binary(text) ->
-        """
-        Previous conversation:
-        #{context}
-
-        Current message:
-        Human: #{text}
-        """
-    end
-  end
-
-  # Extract text from content that may be a string, a list of content blocks, or a map
-  defp extract_text_content(content) when is_binary(content), do: content
-
-  defp extract_text_content(content) when is_list(content) do
-    content
-    |> Enum.filter(fn
-      %{type: "text"} -> true
-      %{"type" => "text"} -> true
-      _ -> false
-    end)
-    |> Enum.map(fn
-      %{text: text} -> text
-      %{"text" => text} -> text
-    end)
-    |> Enum.join(" ")
-  end
-
-  defp extract_text_content(%{content: blocks}) when is_list(blocks) do
-    extract_text_content(blocks)
-  end
-
-  defp extract_text_content(_), do: "[non-text content]"
 end

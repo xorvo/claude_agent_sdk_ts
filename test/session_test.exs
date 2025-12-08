@@ -118,21 +118,21 @@ defmodule ClaudeAgentSdkTs.SessionTest do
     end
   end
 
-  describe "session history with multimodal" do
-    test "history starts empty" do
+  describe "session management" do
+    test "session_id starts as nil" do
       {:ok, session} = Session.start_link()
 
-      assert Session.get_history(session) == []
+      assert Session.get_session_id(session) == nil
 
       Session.stop(session)
     end
 
-    test "reset clears history" do
+    test "reset clears session_id" do
       {:ok, session} = Session.start_link()
 
-      # Reset should work even on empty history
+      # Reset should work even on new session
       assert Session.reset(session) == :ok
-      assert Session.get_history(session) == []
+      assert Session.get_session_id(session) == nil
 
       Session.stop(session)
     end

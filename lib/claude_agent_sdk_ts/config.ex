@@ -46,6 +46,23 @@ defmodule ClaudeAgentSdkTs.Config do
     * `:plan` - Planning mode, no tool execution
     * `:dont_ask` - Don't ask for permissions, deny if not pre-approved
 
+  ## Session Management Options
+
+  The SDK maintains conversation sessions that can be resumed:
+
+    * `:resume` - Session ID to resume a previous conversation
+    * `:continue` - If true, continue the last session in the CWD
+    * `:fork_session` - If true, fork from an existing session instead of modifying it
+    * `:resume_session_at` - Resume at a specific point in the session (UUID)
+
+  Example - resuming a previous session:
+
+      # First chat returns a session_id
+      {:ok, response, session_id} = ClaudeAgentSdkTs.chat("Hello!")
+
+      # Resume that session later
+      {:ok, response2, _} = ClaudeAgentSdkTs.chat("What did I say?", resume: session_id)
+
   ## MCP Servers
 
   The `:mcp_servers` option allows you to connect MCP (Model Context Protocol) servers
@@ -93,7 +110,12 @@ defmodule ClaudeAgentSdkTs.Config do
           use_bedrock: boolean() | nil,
           aws_profile: String.t() | nil,
           aws_region: String.t() | nil,
-          api_key: String.t() | nil
+          api_key: String.t() | nil,
+          # Session management
+          resume: String.t() | nil,
+          continue: boolean() | nil,
+          fork_session: boolean() | nil,
+          resume_session_at: String.t() | nil
         }
 
   defstruct [
@@ -110,7 +132,12 @@ defmodule ClaudeAgentSdkTs.Config do
     :use_bedrock,
     :aws_profile,
     :aws_region,
-    :api_key
+    :api_key,
+    # Session management
+    :resume,
+    :continue,
+    :fork_session,
+    :resume_session_at
   ]
 
   @defaults %{
@@ -127,7 +154,12 @@ defmodule ClaudeAgentSdkTs.Config do
     use_bedrock: nil,
     aws_profile: nil,
     aws_region: nil,
-    api_key: nil
+    api_key: nil,
+    # Session management
+    resume: nil,
+    continue: nil,
+    fork_session: nil,
+    resume_session_at: nil
   }
 
   @doc """

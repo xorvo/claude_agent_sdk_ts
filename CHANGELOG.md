@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2025-12-08
+
+### Added
+
+- **SDK Session Management** - Use the SDK's native session persistence instead of client-side history
+  - `chat/2` and `stream/3` now return `session_id` for conversation continuity
+  - New `:resume` option to resume a previous session by ID
+  - New `:continue` option to continue the last session in the CWD
+  - New `:fork_session` option to fork from an existing session
+  - New `:resume_session_at` option to resume at a specific point
+  - `Session.get_session_id/1` replaces `Session.get_history/1`
+
+### Changed
+
+- **Breaking: Return type changes** - Functions now return session_id:
+  - `chat/2` returns `{:ok, response, session_id}` (was `{:ok, response}`)
+  - `chat!/2` returns `{response, session_id}` (was `response`)
+  - `stream/3` returns `{:ok, session_id}` (was `:ok`)
+  - Stream callbacks receive `session_id` in the `:end` event
+  - **Note:** For streaming, `session_id` is only available when the turn ends (SDK limitation)
+- **Session module refactored** - Now uses SDK session management:
+  - Removed client-side history maintenance
+  - Session state now stores `session_id` instead of `history`
+  - `Session.get_history/1` removed (use `Session.get_session_id/1`)
+
+### Removed
+
+- `Session.get_history/1` - SDK manages conversation history internally
+
 ## [1.5.0-rc.1] - 2025-12-05
 
 ### Added
